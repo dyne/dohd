@@ -286,7 +286,6 @@ static void dohd_reply(int fd, short revents, void *arg)
         return;
 
     age = dnsreply_min_age(buff, len);
-    printf("Age: %d\n", age);
     hdrlen = snprintf(reply, bufsz, STR_REPLY, len, age);
     memcpy(reply + hdrlen, buff, len);
     reply[hdrlen + len] = '\r';
@@ -295,7 +294,6 @@ static void dohd_reply(int fd, short revents, void *arg)
     reply[hdrlen + len+3] = '\n';
     len+=4;
     wolfSSL_write(cd->ssl, reply, hdrlen + len);
-    //printf(reply);
 }
 
 /**
@@ -325,7 +323,6 @@ static void tls_read(int fd, short revents, void *arg)
         if (ret < 0)
             dohd_client_destroy(cd);
         else {
-            //printf(buff);
             dohd_request(fd, cd, buff, ret);
         }
     }
