@@ -48,11 +48,10 @@ struct client_data {
 
 struct client_data *Clients = NULL;
 
-static void dohd_listen_error(int fd, short revents, void *arg)
+static void dohd_listen_error(int __attribute__((unused)) fd,
+        short __attribute__((unused)) revents,
+        void __attribute__((unused)) *arg)
 {
-    (void)fd;
-    (void)revents;
-    (void)arg;
     fprintf(stderr, "FATAL: Error on listening socket\n");
     exit(80);
 }
@@ -223,7 +222,7 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
         skip = dns_skip_question(&record, len);
         if (skip < DNSQ_SUFFIX_LEN) {
             fprintf(stderr, "Cannot parse DNS reply!\n");
-            return min_ttl; 
+            return min_ttl;
         }
         len -= skip;
     }
@@ -252,7 +251,8 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
 /**
  * Receive a reply from DNS server and forward to DoH client
  */
-static void dohd_reply(int fd, short revents, void *arg)
+static void dohd_reply(int fd, short __attribute__((unused)) revents,
+        void *arg)
 {
     const size_t bufsz = 2048;
     uint8_t buff[bufsz];
@@ -262,14 +262,13 @@ static void dohd_reply(int fd, short revents, void *arg)
     int age = 0;
 
     cd = (struct client_data *)arg;
-    (void)revents;
     len = recv(fd, buff, bufsz, 0);
     if (len < 16) {
         fprintf(stderr, "FATAL: localhost DNS on port 53: socket error\n");
         return;
     }
 
-    /* Safety check: client data object must still be in the list, 
+    /* Safety check: client data object must still be in the list,
      * or it may have been previously freed and thus is invalid.
      */
     if (!cd)
@@ -298,21 +297,19 @@ static void dohd_reply(int fd, short revents, void *arg)
  * Receive a request from the DoH client, forward to the DNS
  * server.
  */
-static void tls_read(int fd, short revents, void *arg)
+static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused)) revents, void *arg)
 {
     const size_t bufsz = 4096;
     uint8_t buff[bufsz];
     int ret;
     struct client_data *cd = arg;
-    (void)fd;
-    (void)revents;
 
     if (!cd || !cd->ssl)
         return;
     if (!cd->tls_handshake_done) {
         /* Establish TLS connection */
         ret = wolfSSL_accept(cd->ssl);
-        if (ret != SSL_SUCCESS) 
+        if (ret != SSL_SUCCESS)
             dohd_client_destroy(cd);
         else
             cd->tls_handshake_done = 1;
@@ -330,26 +327,25 @@ static void tls_read(int fd, short revents, void *arg)
 /**
  * Callback for error events
  */
-static void tls_fail(int fd, short revents, void *arg)
+static void tls_fail(int __attribute__((unused)) fd,
+        short __attribute__((unused)) revents,
+        void *arg)
 {
     struct client_data *cd = arg;
-    (void)fd;
-    (void)revents;
     dohd_client_destroy(cd);
 }
 
 /**
  * Accept a new DoH connection, create client data object
  */
-static void dohd_new_connection(int fd, short revents, void *arg)
+static void dohd_new_connection(int __attribute__((unused)) fd,
+        short __attribute__((unused)) revents,
+        void __attribute__((unused)) *arg)
 {
     int connd;
     socklen_t zero = 0;
     struct client_data *cd = NULL;
-    (void)fd;
-    (void)revents;
-    (void)arg;
-    
+
     cd = malloc(sizeof(struct client_data));
     if (cd == NULL) {
         fprintf(stderr, "ERROR: failed to allocate memory for a new connection\n\n");
@@ -390,7 +386,7 @@ static void dohd_new_connection(int fd, short revents, void *arg)
     cd->ev_dns = evquick_addevent(cd->dns_sd, EVQUICK_EV_READ, dohd_reply, tls_fail, cd);
     cd->next = Clients;
     Clients = cd;
-} 
+}
 
 static void usage(const char *name)
 {
@@ -423,7 +419,7 @@ int main(int argc, char *argv[])
         {NULL, 0, 0, '\0' }
     };
     while(1) {
-        c = getopt_long(argc, argv, "hvc:k:p:d:F", long_options, &option_idx); 
+        c = getopt_long(argc, argv, "hvc:k:p:d:F", long_options, &option_idx);
         if (c < 0)
             break;
         switch(c) {
@@ -451,12 +447,12 @@ int main(int argc, char *argv[])
             case 'F':
                 foreground = 1;
                 break;
-            default: 
+            default:
                 usage(argv[0]);
         }
     }
     if (optind < argc)
-        usage(argv[0]); 
+        usage(argv[0]);
         /* implies exit() */
     if (!cert || !key)
         usage(argv[0]);
@@ -477,7 +473,7 @@ int main(int argc, char *argv[])
     wolfSSL_Init();
 
     /* Initialize libevquick */
-    (void)evquick_init();
+    evquick_init();
 
     /* Listening socket */
     lfd = socket(AF_INET6, SOCK_STREAM, 0);
@@ -485,7 +481,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "ERROR: failed to create DoH socket\n");
         return -1;
     }
-    
+
     /* Create and initialize WOLFSSL_CTX */
     if ((wctx = wolfSSL_CTX_new(wolfTLSv1_3_server_method())) == NULL) {
         fprintf(stderr, "ERROR: failed to create WOLFSSL_CTX\n");
