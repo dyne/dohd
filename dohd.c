@@ -102,7 +102,7 @@ static void dohd_client_destroy(struct client_data *cd)
 /**
  * Parse the request coming from DoH, send to DNS resolver
  */
-static void dohd_request(int fd, struct client_data *cd, uint8_t *data, size_t len)
+static void dohd_request(struct client_data *cd, uint8_t *data, size_t len)
 {
     char *hdr = (char *)data;
     char *p_clen, *start_data;
@@ -113,8 +113,6 @@ static void dohd_request(int fd, struct client_data *cd, uint8_t *data, size_t l
         .sin6_addr.s6_addr = IP6_LOCALHOST
     };
     int ret;
-
-    (void)fd;
 
     if (!data) {
         dohd_client_destroy(cd);
@@ -306,6 +304,7 @@ static void tls_read(int fd, short revents, void *arg)
     uint8_t buff[bufsz];
     int ret;
     struct client_data *cd = arg;
+    (void)fd;
     (void)revents;
 
     if (!cd || !cd->ssl)
@@ -323,7 +322,7 @@ static void tls_read(int fd, short revents, void *arg)
         if (ret < 0)
             dohd_client_destroy(cd);
         else {
-            dohd_request(fd, cd, buff, ret);
+            dohd_request(cd, buff, ret);
         }
     }
 }
