@@ -285,11 +285,6 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     age = dnsreply_min_age(buff, len);
     hdrlen = snprintf(reply, bufsz, STR_REPLY, len, age);
     memcpy(reply + hdrlen, buff, len);
-    reply[hdrlen + len] = '\r';
-    reply[hdrlen + len+1] = '\n';
-    reply[hdrlen + len+2] = '\r';
-    reply[hdrlen + len+3] = '\n';
-    len+=4;
     wolfSSL_write(cd->ssl, reply, hdrlen + len);
 }
 
