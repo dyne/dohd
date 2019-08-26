@@ -1,4 +1,4 @@
-CC=gcc
+CC?=gcc
 #CFLAGS=-ggdb
 CFLAGS=-O3 -Wall -Wextra -Wno-sign-compare
 all:dohd
