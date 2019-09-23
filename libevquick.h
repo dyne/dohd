@@ -34,7 +34,7 @@ evquick_timer *evquick_addtimer(CTX ctx, unsigned long long interval, short flag
 
 void evquick_deltimer(CTX ctx, evquick_timer *t);
 
-#else 
+#else
 /* Initialize evquick loop
  * =========
  * To be called before any other function.

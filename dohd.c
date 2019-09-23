@@ -2,7 +2,7 @@
  *      dohd.c
  *
  *      This is free software: you can redistribute it and/or modify
- *      it under the terms of the GNU General Public License version 2, as
+ *      it under the terms of the GNU Affero General Public License, as
  *      published by the free Software Foundation.
  *
  *
@@ -11,12 +11,13 @@
  *      MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *      GNU General Public License for more details.
  *
- *      You should have received a copy of the GNU General Public License
- *      along with dohd.  If not, see <http://www.gnu.org/licenses/>.
+ *      You should have received a copy of the GNU Affero General Public
+ *      License along with dohd.  If not, see <http://www.gnu.org/licenses/>.
  *
  *      Author: Daniele Lacamera <root@danielinux.net>
  *
  */
+
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <stdint.h>
@@ -387,7 +388,7 @@ static void usage(const char *name)
 {
 
     fprintf(stderr, "%s, DNSoverHTTPS minimalist daemon.\n", name);
-    fprintf(stderr, "License: GPL\n");
+    fprintf(stderr, "License: AGPL\n");
     fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-d dnsserver] [-F]\n", name);
     fprintf(stderr, "\tcert and key are the certificate and private key files.\n");
     fprintf(stderr, "\tDefault values: port=8053 dnsserver=\"::1\"\n");
