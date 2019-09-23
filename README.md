@@ -22,7 +22,7 @@ dohd -c *certificate* -k *private-key* \[-p *port*\] \[-F\]
 ### Command line parameters:
 
 - '-c *certificate*' - specifies which certificate for the TLS server. (Mandatory parameter)
-- '-k *private-key*' - specifies the public key for the TLS server. (Mandatory parameter)
+- '-k *private-key*' - specifies the private key used by the TLS server. (Mandatory parameter)
 - '-p *port*' - changes the listening port for the DoH service (default:8053)
 - '-F' - runs dohd in foreground (instead of creating a daemon)
 
