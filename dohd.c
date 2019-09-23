@@ -27,6 +27,7 @@
 #include <arpa/inet.h>
 #include <wolfssl/wolfcrypt/coding.h>
 #include <getopt.h>
+#include <pwd.h>
 #include "libevquick.h"
 
 #define VERSION "v0.1"
@@ -389,8 +390,9 @@ static void usage(const char *name)
 
     fprintf(stderr, "%s, DNSoverHTTPS minimalist daemon.\n", name);
     fprintf(stderr, "License: AGPL\n");
-    fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-d dnsserver] [-F]\n", name);
-    fprintf(stderr, "\tcert and key are the certificate and private key files.\n");
+    fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-d dnsserver] [-F] [-u user]\n", name);
+    fprintf(stderr, "\t'cert' and 'key': certificate and its private key.\n");
+    fprintf(stderr, "\t'user' : login name (when running as root) to switch to (dropping permissions)\n");
     fprintf(stderr, "\tDefault values: port=8053 dnsserver=\"::1\"\n");
     fprintf(stderr, "\tUse '-F' for foreground mode\n\n");
     exit(0);
@@ -399,6 +401,7 @@ static void usage(const char *name)
 int main(int argc, char *argv[])
 {
     char *cert = NULL, *key = NULL;
+    char *user = NULL;
     uint16_t port = DOH_PORT;
     struct sockaddr_in6 serv_addr;
     int option_idx;
@@ -411,11 +414,12 @@ int main(int argc, char *argv[])
         {"key", 1, 0, 'k'},
         {"port", 1, 0, 'p'},
         {"dnsserver", 1, 0, 'd'},
+        {"user", 1, 0, 'u'},
         {"do-not-fork", 0, 0, 'F'},
         {NULL, 0, 0, '\0' }
     };
     while(1) {
-        c = getopt_long(argc, argv, "hvc:k:p:d:F", long_options, &option_idx);
+        c = getopt_long(argc, argv, "hvc:k:p:d:u:F" , long_options, &option_idx);
         if (c < 0)
             break;
         switch(c) {
@@ -439,6 +443,13 @@ int main(int argc, char *argv[])
                 /* TODO */
                 fprintf(stderr, "DNS server selection not available yet.\n");
                 exit(1);
+                break;
+            case 'u':
+                if (getuid() != 0) {
+                    fprintf(stderr, "Warning: -u option used, but not running as root ('user' option: ignored)\n");
+                } else {
+                    user = strdup(optarg);
+                }
                 break;
             case 'F':
                 foreground = 1;
@@ -465,19 +476,63 @@ int main(int argc, char *argv[])
         close(STDERR_FILENO);
         setsid();
     }
+    /* End command line parsing */
+
+    /* Create listening socket */
+    lfd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (lfd < 0) {
+        fprintf(stderr, "ERROR: failed to create DoH socket\n");
+        return -1;
+    }
+
+    /* Fill in the server address */
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin6_family      = AF_INET6;             /* using IPv4      */
+    serv_addr.sin6_port        = htons(port); /* on DEFAULT_PORT */
+
+    /* Bind the server socket to our port */
+    if (bind(lfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
+        fprintf(stderr, "ERROR: failed to bind\n");
+        return -1;
+    }
+
+    /* Drop privileges if running as root */
+    if (getuid() == 0) {
+        struct passwd *pwd;
+        if (!user) {
+            fprintf(stderr, "Error: '-u' option required when running as root to drop privileges. Exiting.\n");
+            close(lfd);
+            exit(2);
+        }
+        pwd = getpwnam(user);
+        if (!pwd) {
+            fprintf(stderr, "Error: invalid username '%s'\n",user);
+            close(lfd);
+            exit(3);
+        }
+        if (pwd->pw_uid == 0) {
+            fprintf(stderr, "Error: invalid UID for username '%s'\n", user);
+            close(lfd);
+            exit(3);
+        }
+        if (setgid(pwd->pw_gid) < 0) {
+            perror("setgid");
+            close(lfd);
+            exit(4);
+        }
+        if (setuid(pwd->pw_uid) < 0) {
+            perror("setuid");
+            close(lfd);
+            exit(4);
+        }
+        fprintf(stderr, "setuid(%d) + setgid(%d)\n", pwd->pw_uid, pwd->pw_gid);
+    }
 
     /* Initialize wolfSSL */
     wolfSSL_Init();
 
     /* Initialize libevquick */
     evquick_init();
-
-    /* Listening socket */
-    lfd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (lfd < 0) {
-        fprintf(stderr, "ERROR: failed to create DoH socket\n");
-        return -1;
-    }
 
     /* Create and initialize WOLFSSL_CTX */
     if ((wctx = wolfSSL_CTX_new(wolfTLSv1_3_server_method())) == NULL) {
@@ -498,19 +553,6 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    /* Initialize the server address struct with zeros */
-    memset(&serv_addr, 0, sizeof(serv_addr));
-
-    /* Fill in the server address */
-    serv_addr.sin6_family      = AF_INET6;             /* using IPv4      */
-    serv_addr.sin6_port        = htons(port); /* on DEFAULT_PORT */
-
-
-    /* Bind the server socket to our port */
-    if (bind(lfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
-        fprintf(stderr, "ERROR: failed to bind\n");
-        return -1;
-    }
 
     /* Listen for a new connection, allow 10 pending connections */
     if (listen(lfd, 10) == -1) {
