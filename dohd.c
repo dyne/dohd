@@ -312,10 +312,14 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             cd->tls_handshake_done = 1;
     } else {
         /* Read the client data into our buff array */
-        ret = wolfSSL_read(cd->ssl, buff, bufsz);
+        ret = wolfSSL_read(cd->ssl, buff, bufsz - 1);
         if (ret < 0)
             dohd_client_destroy(cd);
         else {
+            /* Safety null-termination because
+             * dohd_request uses strstr() to parse
+             * the request */
+            buff[ret] = 0;
             dohd_request(cd, buff, ret);
         }
     }
