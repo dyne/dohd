@@ -5,7 +5,7 @@ to a local DNS server running on localhost:53 (UDP).
 
 ## Features
 
-- Partial support for RFC8484 DNS-over-HTTPS (POST method only for now)
+- Support for RFC8484 DNS-over-HTTPS (POST and GET method) - HTTP/1.1 only for now.
 - Record freshness derived from minimum TTL among answers
 
 ## Building
@@ -33,6 +33,15 @@ dohd -c *certificate* -k *private-key* \[-p *port*\] \[-F\] \[-u *user*\]
 - check 'Enable DNS over HTTPS'
 - Enable 'custom' option
 - specify the URL of your DoH server
+- Optional: set the Trusted Recursive Resolver (TRR) mode via 'about:settings' under `network_trr_mode`. Possible values:
+   - 0 - _Off_ (default). use standard native resolving only (don't use TRR at all)
+   - 1 -  _Reserved_. (do not use)
+   - 2 -  _First_. Use TRR first, and only if the name resolve fails use the native resolver as a fallback.
+   - 3 -  _Only_. Only use TRR, never use the native resolver.
+   - 4 -  _Reserved_. (do not use)
+   - 5 -  _Off by choice_. This is the same as 0 but marks it as done by choice and not done by default.
+
+More info available on [wiki.mozilla.org](https://wiki.mozilla.org/Trusted_Recursive_Resolver).
 
 ### Disclaimer
 
