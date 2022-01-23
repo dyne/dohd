@@ -27,12 +27,15 @@
 #include <arpa/inet.h>
 #include <wolfssl/wolfcrypt/coding.h>
 #include <getopt.h>
+#include <libgen.h>
 #include <pwd.h>
 #include "libevquick.h"
 
 #define VERSION "v0.1"
 
 #define DOH_PORT 8053
+#define DEC_BUFFER_MAXSIZE 1460
+
 static int lfd = -1;
 static WOLFSSL_CTX *wctx = NULL;
 
@@ -114,17 +117,13 @@ static void dohd_request(struct client_data *cd, uint8_t *data, size_t len)
         .sin6_addr.s6_addr = IP6_LOCALHOST
     };
     int ret;
+    uint8_t dec_buffer[DEC_BUFFER_MAXSIZE];
 
     if (!data) {
         dohd_client_destroy(cd);
         return;
     }
-
     if (len < DOHD_REQ_MIN) {
-        dohd_client_destroy(cd);
-        return;
-    }
-    if (strncmp(hdr, "POST /", 6) != 0){
         dohd_client_destroy(cd);
         return;
     }
@@ -132,28 +131,56 @@ static void dohd_request(struct client_data *cd, uint8_t *data, size_t len)
         dohd_client_destroy(cd);
         return;
     }
-    p_clen = strstr(hdr, STR_CONTENT_LEN);
-    if (!p_clen) {
-        dohd_client_destroy(cd);
-        return;
-    }
-    p_clen += strlen(STR_CONTENT_LEN);
+    if (strncmp(hdr, "POST /", 6) == 0) {
+        p_clen = strstr(hdr, STR_CONTENT_LEN);
+        if (!p_clen) {
+            dohd_client_destroy(cd);
+            return;
+        }
+        p_clen += strlen(STR_CONTENT_LEN);
 
-    content_len = strtol(p_clen, NULL, 10);
-    if (content_len < 8) {
+        content_len = strtol(p_clen, NULL, 10);
+        if (content_len < 8) {
+            dohd_client_destroy(cd);
+            return;
+        }
+        if (content_len > len) {
+            dohd_client_destroy(cd);
+            return;
+        }
+        start_data = strstr(p_clen, "\r\n\r\n");
+        if (!start_data) {
+            dohd_client_destroy(cd);
+            return;
+        }
+        start_data += 4;
+    } else if (strncmp(hdr, "GET /", 5) == 0) {
+        uint32_t outlen = DEC_BUFFER_MAXSIZE;
+        char *end_data;
+        start_data = strstr(hdr, "?dns=");
+        if (!start_data) {
+            dohd_client_destroy(cd);
+            return;
+        }
+        start_data += 5;
+        end_data = strchr(start_data, ' ');
+        if (!end_data) {
+            dohd_client_destroy(cd);
+            return;
+        }
+        *end_data = 0;
+        ret = Base64_Decode((uint8_t *)start_data, strlen(start_data), dec_buffer, &outlen);
+        if (ret != 0) {
+            dohd_client_destroy(cd);
+            return;
+        }
+        start_data = (char *)dec_buffer;
+        content_len = outlen;
+    } else {
+        /* Invalid request type */
         dohd_client_destroy(cd);
         return;
     }
-    if (content_len > len) {
-        dohd_client_destroy(cd);
-        return;
-    }
-    start_data = strstr(p_clen, "\r\n\r\n");
-    if (!start_data) {
-        dohd_client_destroy(cd);
-        return;
-    }
-    start_data += 4;
     ret = sendto(cd->dns_sd, start_data, content_len, 0, (struct sockaddr *)&local_dns_addr, sizeof(struct sockaddr_in6));
     if (ret < 0) {
         fprintf(stderr, "FATAL: localhost DNS on port 53: socket error\n");
@@ -287,6 +314,8 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     age = dnsreply_min_age(buff, len);
     hdrlen = snprintf(reply, bufsz, STR_REPLY, len, age);
     memcpy(reply + hdrlen, buff, len);
+
+    reply[hdrlen + len] = 0;
     wolfSSL_write(cd->ssl, reply, hdrlen + len);
 }
 
@@ -402,6 +431,7 @@ static void usage(const char *name)
     exit(0);
 }
 
+
 int main(int argc, char *argv[])
 {
     char *cert = NULL, *key = NULL;
@@ -412,15 +442,15 @@ int main(int argc, char *argv[])
     int c;
     int foreground = 0;
     struct option long_options[] = {
-		{"help",0 , 0, 'h'},
-		{"version", 0, 0, 'v'},
-        {"cert", 1, 0, 'c' },
-        {"key", 1, 0, 'k'},
-        {"port", 1, 0, 'p'},
-        {"dnsserver", 1, 0, 'd'},
-        {"user", 1, 0, 'u'},
-        {"do-not-fork", 0, 0, 'F'},
-        {NULL, 0, 0, '\0' }
+            {"help",0 , 0, 'h'},
+            {"version", 0, 0, 'v'},
+            {"cert", 1, 0, 'c' },
+            {"key", 1, 0, 'k'},
+            {"port", 1, 0, 'p'},
+            {"dnsserver", 1, 0, 'd'},
+            {"user", 1, 0, 'u'},
+            {"do-not-fork", 0, 0, 'F'},
+            {NULL, 0, 0, '\0' }
     };
     while(1) {
         c = getopt_long(argc, argv, "hvc:k:p:d:u:F" , long_options, &option_idx);
@@ -544,8 +574,7 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    if (wolfSSL_CTX_use_certificate_file(wctx, cert, SSL_FILETYPE_PEM)
-        != SSL_SUCCESS) {
+    if (wolfSSL_CTX_use_certificate_file(wctx, cert, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
         fprintf(stderr, "ERROR: failed to load %s, please check the file.\n", cert);
         return -1;
     }
@@ -567,6 +596,7 @@ int main(int argc, char *argv[])
     evquick_addevent(lfd, EVQUICK_EV_READ, dohd_new_connection, dohd_listen_error, wctx);
     evquick_loop();
     free(cert);
+    cert = NULL;
     free(key);
     return 0;
 }
