@@ -28,6 +28,7 @@
 #include <wolfssl/wolfcrypt/coding.h>
 #include <getopt.h>
 #include <libgen.h>
+#include <signal.h>
 #include <pwd.h>
 #include "libevquick.h"
 
@@ -65,6 +66,7 @@ struct __attribute__((packed)) dns_header
 
 static int lfd = -1;
 static WOLFSSL_CTX *wctx = NULL;
+void *sigset(int sig, void (*disp)(int));
 
 
 struct req_slot {
@@ -96,6 +98,28 @@ static void dohd_listen_error(int __attribute__((unused)) fd,
     fprintf(stderr, "FATAL: Error on listening socket\n");
     exit(80);
 }
+
+static void sig_stats(int __attribute__((unused)) signo)
+{
+    unsigned count_cl= 0, count_sock = 0;
+    struct client_data *cl;
+    struct req_slot *r;
+    fprintf(stderr,"DoHd stats\n");
+    cl = Clients;
+    while(cl) {
+        count_cl++;
+        r = cl->list;
+        while(r) {
+            count_sock++;
+            r = r->next;
+        }
+        cl = cl->next;
+    }
+    fprintf(stderr, "Clients: %u\n", count_cl);
+    fprintf(stderr, "UDP sockets (active requests): %u\n", count_sock);
+    fprintf(stderr, "\n");
+}
+
 
 static void dohd_client_destroy(struct client_data *cd)
 {
@@ -607,6 +631,9 @@ int main(int argc, char *argv[])
         setsid();
     }
     /* End command line parsing */
+
+    /* Set SIGUSR1 */
+    sigset(SIGUSR1, sig_stats);
 
     /* Create listening socket */
     lfd = socket(AF_INET6, SOCK_STREAM, 0);
