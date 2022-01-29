@@ -31,25 +31,61 @@
 #include <pwd.h>
 #include "libevquick.h"
 
-#define VERSION "v0.1"
+#define VERSION "v0.2"
 
 #define DOH_PORT 8053
 #define DEC_BUFFER_MAXSIZE 1460
+
+#define HTTP2_MODE 0 /* Change to '1' once implemented */
+
+#define IP6_LOCALHOST { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }
+#define DOHD_REQ_MIN 40
+#define STR_HTTP2_PREFACE "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+#define STR_ACCEPT_DNS_MSG "Accept: application/dns-message"
+#define STR_CONTENT_LEN    "Content-Length: "
+#define STR_REPLY "HTTP/1.1 200 OK\r\nServer: dohd\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nCache-Control: max-age=%d\r\n\r\n"
+
+struct __attribute__((packed)) dns_header
+{
+    uint16_t id;        /* Packet id */
+    uint8_t rd : 1;     /* Recursion Desired */
+    uint8_t tc : 1;     /* TrunCation */
+    uint8_t aa : 1;     /* Authoritative Answer */
+    uint8_t opcode : 4; /* Opcode */
+    uint8_t qr : 1;     /* Query/Response */
+    uint8_t rcode : 4;  /* Response code */
+    uint8_t z : 3;      /* Zero */
+    uint8_t ra : 1;     /* Recursion Available */
+    uint16_t qdcount;   /* Question count */
+    uint16_t ancount;   /* Answer count */
+    uint16_t nscount;   /* Authority count */
+    uint16_t arcount;   /* Additional count */
+};
+#define DNSQ_SUFFIX_LEN (4)
 
 static int lfd = -1;
 static WOLFSSL_CTX *wctx = NULL;
 
 
+struct req_slot {
+    struct client_data *owner;
+    struct evquick_event *ev_dns;
+    int dns_sd;
+    uint16_t id;
+    struct req_slot *next;
+};
 
 struct client_data {
     WOLFSSL *ssl;
-    struct evquick_event *ev_doh, *ev_dns;
+    struct evquick_event *ev_doh;
     int tls_handshake_done;
-    uint16_t id;
     int doh_sd;
-    int dns_sd;
     struct client_data *next;
+    struct req_slot *list;
 };
+
+static void dohd_reply(int fd, short __attribute__((unused)) revents,
+        void *arg);
 
 struct client_data *Clients = NULL;
 
@@ -64,6 +100,7 @@ static void dohd_listen_error(int __attribute__((unused)) fd,
 static void dohd_client_destroy(struct client_data *cd)
 {
     struct client_data *l = Clients, *prev = NULL;
+    struct req_slot *rp;
     if (!cd)
         return;
     wolfSSL_write(cd->ssl, "HTTP/1.1 404 Not Found\r\n\r\n", 26);
@@ -87,125 +124,156 @@ static void dohd_client_destroy(struct client_data *cd)
     }
     /* Close client socket descriptor */
     close(cd->doh_sd);
-    close(cd->dns_sd);
+
+    /* Cleanup pending requests */
+    rp = cd->list;
+    while(rp) {
+        if (rp->dns_sd > 0)
+            close(rp->dns_sd);
+        evquick_delevent(rp->ev_dns);
+        free(rp);
+        rp = rp->next;
+    }
     /* Remove events from file desc */
     if (cd->ev_doh)
         evquick_delevent(cd->ev_doh);
-    if (cd->ev_dns)
-        evquick_delevent(cd->ev_dns);
     /* free up client data */
     free(cd);
 }
 
-#define IP6_LOCALHOST { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }
-#define DOHD_REQ_MIN 40
-#define STR_ACCEPT_DNS_MSG "Accept: application/dns-message"
-#define STR_CONTENT_LEN    "Content-Length: "
-#define STR_REPLY "HTTP/1.1 200 OK\r\nServer: dohd\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nCache-Control: max-age=%d\r\n\r\n"
 
-/**
- * Parse the request coming from DoH, send to DNS resolver
- */
-static void dohd_request(struct client_data *cd, uint8_t *data, size_t len)
+void dns_send_request(struct client_data *cd, void *data, size_t size)
 {
-    char *hdr = (char *)data;
-    char *p_clen, *start_data;
-    unsigned int content_len = 0;
+    int ret;
+    struct req_slot *req = NULL, *l;
+    struct dns_header *hdr;
     struct sockaddr_in6 local_dns_addr = {
         .sin6_family = AF_INET6,
         .sin6_port = htons(53),
         .sin6_addr.s6_addr = IP6_LOCALHOST
     };
-    int ret;
-    uint8_t dec_buffer[DEC_BUFFER_MAXSIZE];
 
-    if (!data) {
-        dohd_client_destroy(cd);
+    /* Parse DNS header: only check the qr flag. */
+    hdr = (struct dns_header *)data;
+    if (hdr->qr != 0) {
         return;
     }
-    if (len < DOHD_REQ_MIN) {
-        dohd_client_destroy(cd);
+    req = malloc(sizeof(struct req_slot));
+    if (req == NULL) {
+        fprintf(stderr, "ERROR: failed to allocate memory for a new DNS request\n\n");
         return;
     }
-    if (!strstr(hdr, STR_ACCEPT_DNS_MSG)) {
-        dohd_client_destroy(cd);
-        return;
-    }
-    if (strncmp(hdr, "POST /", 6) == 0) {
-        p_clen = strstr(hdr, STR_CONTENT_LEN);
-        if (!p_clen) {
-            dohd_client_destroy(cd);
-            return;
-        }
-        p_clen += strlen(STR_CONTENT_LEN);
+    memset(req, 0, sizeof(struct req_slot));
 
-        content_len = strtol(p_clen, NULL, 10);
-        if (content_len < 8) {
-            dohd_client_destroy(cd);
-            return;
-        }
-        if (content_len > len) {
-            dohd_client_destroy(cd);
-            return;
-        }
-        start_data = strstr(p_clen, "\r\n\r\n");
-        if (!start_data) {
-            dohd_client_destroy(cd);
-            return;
-        }
-        start_data += 4;
-    } else if (strncmp(hdr, "GET /", 5) == 0) {
-        uint32_t outlen = DEC_BUFFER_MAXSIZE;
-        char *end_data;
-        start_data = strstr(hdr, "?dns=");
-        if (!start_data) {
-            dohd_client_destroy(cd);
-            return;
-        }
-        start_data += 5;
-        end_data = strchr(start_data, ' ');
-        if (!end_data) {
-            dohd_client_destroy(cd);
-            return;
-        }
-        *end_data = 0;
-        ret = Base64_Decode((uint8_t *)start_data, strlen(start_data), dec_buffer, &outlen);
-        if (ret != 0) {
-            dohd_client_destroy(cd);
-            return;
-        }
-        start_data = (char *)dec_buffer;
-        content_len = outlen;
-    } else {
-        /* Invalid request type */
-        dohd_client_destroy(cd);
+    /* Create local dns socket */
+    req->dns_sd = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (req->dns_sd < 0) {
+        fprintf(stderr, "ERROR: failed to create local dns socket\n");
+        free(req);
         return;
     }
-    ret = sendto(cd->dns_sd, start_data, content_len, 0, (struct sockaddr *)&local_dns_addr, sizeof(struct sockaddr_in6));
+    /* append to list */
+    if (cd->list == NULL)
+        cd->list = req;
+    else {
+        l = cd->list;
+        while(l) {
+            if (l->next == NULL) {
+                l->next = req;
+                break;
+            }
+            l = l->next;
+        }
+    }
+    req->owner = cd;
+    req->id = htons(hdr->id);
+    req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply, NULL, req);
+    ret = sendto(req->dns_sd, data, size, 0, (struct sockaddr *)&local_dns_addr, sizeof(struct sockaddr_in6));
     if (ret < 0) {
         fprintf(stderr, "FATAL: localhost DNS on port 53: socket error\n");
         exit(53);
     }
 }
 
-struct __attribute__((packed)) dns_header
+/**
+ * Parse the request coming from DoH, send to DNS resolver
+ */
+static void dohd_request_post(struct client_data *cd, uint8_t *data, size_t len)
 {
-    uint16_t id;        /* Packet id */
-    uint8_t rd : 1;     /* Recursion Desired */
-    uint8_t tc : 1;     /* TrunCation */
-    uint8_t aa : 1;     /* Authoritative Answer */
-    uint8_t opcode : 4; /* Opcode */
-    uint8_t qr : 1;     /* Query/Response */
-    uint8_t rcode : 4;  /* Response code */
-    uint8_t z : 3;      /* Zero */
-    uint8_t ra : 1;     /* Recursion Available */
-    uint16_t qdcount;   /* Question count */
-    uint16_t ancount;   /* Answer count */
-    uint16_t nscount;   /* Authority count */
-    uint16_t arcount;   /* Additional count */
-};
-#define DNSQ_SUFFIX_LEN (4)
+    char *hdr = (char *)data;
+    char *p_clen, *start_data;
+    unsigned int content_len = 0;
+    if (!strstr(hdr, STR_ACCEPT_DNS_MSG)) {
+        dohd_client_destroy(cd);
+        return;
+    }
 
+    p_clen = strstr(hdr, STR_CONTENT_LEN);
+    if (!p_clen) {
+        dohd_client_destroy(cd);
+        return;
+    }
+    p_clen += strlen(STR_CONTENT_LEN);
+
+    content_len = strtol(p_clen, NULL, 10);
+    if (content_len < 8) {
+        dohd_client_destroy(cd);
+        return;
+    }
+    if (content_len > len) {
+        dohd_client_destroy(cd);
+        return;
+    }
+    start_data = strstr(p_clen, "\r\n\r\n");
+    if (!start_data) {
+        dohd_client_destroy(cd);
+        return;
+    }
+    start_data += 4;
+    dns_send_request(cd, start_data, content_len);
+}
+
+static void dohd_request_get(struct client_data *cd, uint8_t *data,
+        size_t __attribute__((unused)) len)
+{
+    char *hdr = (char *)data;
+    char *start_data, *end_data;
+    uint32_t outlen = DEC_BUFFER_MAXSIZE;
+    uint8_t dec_buffer[DEC_BUFFER_MAXSIZE];
+    int ret;
+
+    if (!strstr(hdr, STR_ACCEPT_DNS_MSG)) {
+        dohd_client_destroy(cd);
+        return;
+    }
+    start_data = strstr(hdr, "?dns=");
+    if (!start_data) {
+        dohd_client_destroy(cd);
+        return;
+    }
+    start_data += 5;
+    end_data = strchr(start_data, ' ');
+    if (!end_data) {
+        dohd_client_destroy(cd);
+        return;
+    }
+    *end_data = 0;
+    ret = Base64_Decode((uint8_t *)start_data, strlen(start_data), dec_buffer, &outlen);
+    if (ret != 0) {
+        dohd_client_destroy(cd);
+        return;
+    }
+    start_data = (char *)dec_buffer;
+    dns_send_request(cd, start_data, (end_data - start_data));
+}
+
+static void dohd_request_http2(struct client_data *cd, uint8_t *data,
+        size_t __attribute__((unused)) len)
+{
+    fprintf(stderr, "Received HTTP2 Request: %s\n", (char *)data);
+    /*TODO: implement HTTP2*/
+    dohd_client_destroy(cd);
+}
 
 /**
  * Skip exactly one question record in the dns reply.
@@ -278,7 +346,7 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
 
 
 /**
- * Receive a reply from DNS server and forward to DoH client
+ * Receive a reply from DNS server and forward to DoH client. Close request.
  */
 static void dohd_reply(int fd, short __attribute__((unused)) revents,
         void *arg)
@@ -289,19 +357,20 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     int hdrlen, len;
     struct client_data *cd, *l;
     int age = 0;
-
-    cd = (struct client_data *)arg;
+    struct req_slot *req, *rd;
+    req = (struct req_slot *)arg;
+    cd = req->owner;
     len = recv(fd, buff, bufsz, 0);
     if (len < 16) {
         fprintf(stderr, "FATAL: localhost DNS on port 53: socket error\n");
-        return;
+        goto destroy;
     }
 
     /* Safety check: client data object must still be in the list,
      * or it may have been previously freed and thus is invalid.
      */
     if (!cd)
-        return;
+        goto destroy;
     l = Clients;
     while (l) {
         if (l == cd)
@@ -309,14 +378,32 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
        l = l->next;
     }
     if (!l)
-        return;
+        goto destroy;
 
+    /* Fix records age and send answers to DoH client */
     age = dnsreply_min_age(buff, len);
     hdrlen = snprintf(reply, bufsz, STR_REPLY, len, age);
     memcpy(reply + hdrlen, buff, len);
-
     reply[hdrlen + len] = 0;
     wolfSSL_write(cd->ssl, reply, hdrlen + len);
+
+destroy:
+    /* Remove request from the list */
+    rd = cd->list;
+    while(rd) {
+        if (rd == req) {
+            cd->list = req->next;
+            break;
+        }
+        if (rd->next == req) {
+            rd->next = req->next;
+            break;
+        }
+        rd = rd->next;
+    }
+    evquick_delevent(req->ev_dns);
+    close(req->dns_sd);
+    free(req);
 }
 
 /**
@@ -329,27 +416,41 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
     uint8_t buff[bufsz];
     int ret;
     struct client_data *cd = arg;
-
     if (!cd || !cd->ssl)
         return;
     if (!cd->tls_handshake_done) {
         /* Establish TLS connection */
         ret = wolfSSL_accept(cd->ssl);
-        if (ret != SSL_SUCCESS)
+        if (ret != SSL_SUCCESS) {
             dohd_client_destroy(cd);
-        else
+        } else {
             cd->tls_handshake_done = 1;
+        }
     } else {
         /* Read the client data into our buff array */
         ret = wolfSSL_read(cd->ssl, buff, bufsz - 1);
         if (ret < 0)
             dohd_client_destroy(cd);
         else {
-            /* Safety null-termination because
-             * dohd_request uses strstr() to parse
-             * the request */
-            buff[ret] = 0;
-            dohd_request(cd, buff, ret);
+            if (ret < DOHD_REQ_MIN) {
+                dohd_client_destroy(cd);
+                return;
+            }
+            if (strncmp((char*)buff, "POST /", 6) == 0) {
+                /* Safety null-termination because
+                 * dohd_request uses strstr() to parse
+                 * the request */
+                buff[ret] = 0;
+                dohd_request_post(cd, buff, ret);
+            } else if (strncmp((char *)buff, "GET /?dns=", 10) == 0) {
+                buff[ret] = 0;
+                dohd_request_get(cd, buff, ret);
+            } else if (strncmp((char *)buff, STR_HTTP2_PREFACE, 24) == 0) {
+                dohd_request_http2(cd, buff, ret);
+            } else {
+                buff[ret] = 0;
+                dohd_client_destroy(cd);
+            }
         }
     }
 }
@@ -402,18 +503,13 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     /* Attach wolfSSL to the socket */
     wolfSSL_set_fd(cd->ssl, connd);
 
-    /* Create local dns socket */
-    cd->dns_sd = socket(AF_INET6, SOCK_DGRAM, 0);
-    if (cd->dns_sd < 0) {
-        fprintf(stderr, "ERROR: failed to create local dns socket\n");
-        wolfSSL_free(cd->ssl);
-        close(connd);
-        free(cd);
-        return;
-    }
+#if (HTTP2_MODE)
+    /* Enable HTTP2 via ALPN */
+    wolfSSL_UseALPN(cd->ssl, "h2", 2, WOLFSSL_ALPN_CONTINUE_ON_MISMATCH);
+#endif
+
     cd->doh_sd = connd;
     cd->ev_doh = evquick_addevent(cd->doh_sd, EVQUICK_EV_READ, tls_read, tls_fail, cd);
-    cd->ev_dns = evquick_addevent(cd->dns_sd, EVQUICK_EV_READ, dohd_reply, tls_fail, cd);
     cd->next = Clients;
     Clients = cd;
 }
@@ -565,11 +661,14 @@ int main(int argc, char *argv[])
     /* Initialize wolfSSL */
     wolfSSL_Init();
 
+    /* Enable debug, if active */
+    //wolfSSL_Debugging_ON();
+
     /* Initialize libevquick */
     evquick_init();
 
     /* Create and initialize WOLFSSL_CTX */
-    if ((wctx = wolfSSL_CTX_new(wolfTLSv1_3_server_method())) == NULL) {
+    if ((wctx = wolfSSL_CTX_new(wolfTLSv1_2_server_method())) == NULL) {
         fprintf(stderr, "ERROR: failed to create WOLFSSL_CTX\n");
         return -1;
     }

@@ -35,6 +35,7 @@
 *.i*86
 *.x86_64
 *.hex
+dohd
 
 # Debug files
 *.dSYM/
@@ -44,3 +45,4 @@
 
 # Tags file
 tags
+
