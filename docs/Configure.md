@@ -11,11 +11,11 @@ There are several browsers compatible with DNS over HTTPS (DoH). This protocol l
 1. Click on the **Settings** button.
 1. Click **Enable DNS over HTTPS**. Use provider **Custom** and write **https://dohd.dyne.org**.
 ![firefox enable dns over https](firefox_net_set_2.jpg)
-1. Then go to Firefox **about:config**
+1. Then go to Firefox [about:config](about:config)
 ![firefox about config](firefox_net_set_3.jpg)
 1. And search for **network.trr.mode** then set it to **2** or **3** (meaning [Only use TRR, never use the native resolver](https://wiki.mozilla.org/Trusted_Recursive_Resolver))
 ![firefox trr set](firefox_net_set_4.jpg)
-1. Enjoy DOHD!
+1. Enjoy DOHD! See it works from [about:networking](about:networking)
 ![firefox dohd functioning](firefox_net_set_5.jpg)
 
 ## Google Chrome
@@ -42,9 +42,4 @@ There are several browsers compatible with DNS over HTTPS (DoH). This protocol l
 1. Navigate to **Privacy and security** > **Security**.
 1. Enable **Use secure DNS**.
 1. Click **With Custom** and write **https://dohd.dyne.org**.
-
-## How to check if my browser is configured correctly?
-
-1. Visit [1.1.1.1 help page](https://1.1.1.1/help).
-1. Verify that `Using DNS over HTTPS (DoH)` is `Yes`.
 
