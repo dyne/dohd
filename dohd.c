@@ -34,7 +34,7 @@
 #include <time.h>
 #include "libevquick.h"
 
-#define VERSION "v0.2"
+#define VERSION "v0.3"
 
 #define DOH_PORT 8053
 #define DEC_BUFFER_MAXSIZE 1460
