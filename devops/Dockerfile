@@ -4,14 +4,15 @@ FROM dyne/devuan:chimaera
 
 RUN apt-get update -y -q \
     && apt-get install --no-install-recommends -y -q libwolfssl-dev \
-    git gcc make libc6-dev bind9 daemontools \
+    git gcc make libc6-dev bind9 daemontools gdb \
     && apt-get clean && rm -rf /var/cache/apt
-RUN git clone https://github.com/dyne/dohd \
-    && cd dohd && make && cp dohd /usr/bin/
+COPY . dohd/
+WORKDIR dohd
+RUN make && cp dohd /usr/bin/
 RUN adduser dohd --shell=/bin/false --no-create-home --disabled-password
 RUN openssl req -nodes -newkey rsa:4096 -keyout /etc/test.key -out /etc/test.csr \
     -subj "/C=IT/ST=Rome/L=Rome/O=Local Host/OU=Testing Department/CN=example.com" \
     && openssl x509 -req -sha256 -days 365 \
     -in /etc/test.csr -signkey /etc/test.key -out /etc/test.crt \
     && chown dohd:dohd /etc/test.*
-CMD /etc/init.d/named start && dohd -c /etc/test.crt -k /etc/test.key -u dohd -F
+CMD /etc/init.d/named start && dohd -c /etc/test.crt -k /etc/test.key -p 8053 -u dohd -F -v
