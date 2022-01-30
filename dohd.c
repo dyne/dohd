@@ -46,6 +46,7 @@
 #define DOHD_REQ_MIN 40
 #define STR_HTTP2_PREFACE "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 #define STR_ACCEPT_DNS_MSG "Accept: application/dns-message"
+#define STR_ACCEPT_ANY     "Accept: */*"
 #define STR_CONTENT_LEN    "Content-Length: "
 #define STR_REPLY "HTTP/1.1 200 OK\r\nServer: dohd\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nCache-Control: max-age=%d\r\n\r\n"
 
@@ -55,6 +56,11 @@
 #define DOH_NOTICE LOG_NOTICE
 #define DOH_INFO   LOG_INFO
 #define DOH_DEBUG  LOG_DEBUG
+
+
+#define MAX_RESOLVERS 256
+struct sockaddr *Resolver[MAX_RESOLVERS];
+unsigned n_resolvers = 0, resolver_rr = 0;
 
 
 /* Resource statistics (memory, sockets, etc.) */
@@ -67,6 +73,7 @@ static struct doh_stats {
     /* Requests divided by type */
     uint64_t http_post_requests;
     uint64_t http_get_requests;
+    uint64_t http_head_requests;
     uint64_t http_notvalid_requests;
     uint64_t http2_requests;
     uint64_t socket_errors;
@@ -141,8 +148,8 @@ static char *uptime(void)
     days = diff / (3600 * 24);
     diff -= (days * 3600 * 24);
 
-    hrs = diff / (60 * 24);
-    diff -= (hrs * 60 * 24);
+    hrs = diff / (3600);
+    diff -= (hrs * 3600);
 
     min = diff / 60;
     diff -= (min * 60);
@@ -172,6 +179,7 @@ static void printstats(void)
     dohprint(LOG_NOTICE, "    - Total replies served        : %lu", DOH_Stats.tot_replies);
     dohprint(LOG_NOTICE, "- HTTPS Requests by type:");
     dohprint(LOG_NOTICE, "    - HTTP/1.1 GET : %lu", DOH_Stats.http_get_requests);
+    dohprint(LOG_NOTICE, "    - HTTP/1.1 HEAD: %lu", DOH_Stats.http_head_requests);
     dohprint(LOG_NOTICE, "    - HTTP/1.1 POST: %lu", DOH_Stats.http_post_requests);
     dohprint(LOG_NOTICE, "    - HTTP/2       : %lu", DOH_Stats.http2_requests);
     dohprint(LOG_NOTICE, "- Failures:");
@@ -309,17 +317,22 @@ static void dohd_client_destroy(struct client_data *cd)
     check_stats();
 }
 
+static struct sockaddr *next_resolver(void)
+{
+    resolver_rr++;
+    if (resolver_rr >= n_resolvers)
+        resolver_rr = 0;
+    return Resolver[resolver_rr];
+}
+
 
 void dns_send_request(struct client_data *cd, void *data, size_t size)
 {
     int ret;
     struct req_slot *req = NULL, *l;
     struct dns_header *hdr;
-    struct sockaddr_in6 local_dns_addr = {
-        .sin6_family = AF_INET6,
-        .sin6_port = htons(53),
-        .sin6_addr.s6_addr = IP6_LOCALHOST
-    };
+    struct sockaddr_in *resolver = NULL;
+    socklen_t sock_sz = sizeof(struct sockaddr_in);
 
     /* Parse DNS header: only check the qr flag. */
     hdr = (struct dns_header *)data;
@@ -333,8 +346,14 @@ void dns_send_request(struct client_data *cd, void *data, size_t size)
     }
     memset(req, 0, sizeof(struct req_slot));
 
+    resolver = (struct sockaddr_in *)next_resolver();
+
+    /* Change AF / socksize if IPV6 */
+    if (resolver->sin_family == AF_INET6)
+        sock_sz = sizeof(struct sockaddr_in6);
+
     /* Create local dns socket */
-    req->dns_sd = socket(AF_INET6, SOCK_DGRAM, 0);
+    req->dns_sd = socket(resolver->sin_family, SOCK_DGRAM, 0);
     if (req->dns_sd < 0) {
         dohprint(DOH_ERR, "Failed to create traditional DNS socket to forward the request.");
         free(req);
@@ -363,7 +382,7 @@ void dns_send_request(struct client_data *cd, void *data, size_t size)
     req->owner = cd;
     req->id = htons(hdr->id);
     req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply, NULL, req);
-    ret = sendto(req->dns_sd, data, size, 0, (struct sockaddr *)&local_dns_addr, sizeof(struct sockaddr_in6));
+    ret = sendto(req->dns_sd, data, size, 0, (struct sockaddr *)resolver, sock_sz);
     if (ret < 0) {
         dohprint(DOH_ERR, "Fatal error: could not reach any recursive resolver at address %s port 53\n", "localhost");
         exit(53);
@@ -379,7 +398,9 @@ static int dohd_request_post(struct client_data *cd, uint8_t *data, size_t len)
     char *hdr = (char *)data;
     char *p_clen, *start_data;
     unsigned int content_len = 0;
-    if (!strstr(hdr, STR_ACCEPT_DNS_MSG)) {
+    if (!strstr(hdr, STR_ACCEPT_DNS_MSG)
+            && (!strstr(hdr, STR_ACCEPT_ANY))
+            ) {
         dohd_client_destroy(cd);
         return -1;
     }
@@ -419,7 +440,9 @@ static int dohd_request_get(struct client_data *cd, uint8_t *data,
     uint8_t dec_buffer[DEC_BUFFER_MAXSIZE];
     int ret;
 
-    if (!strstr(hdr, STR_ACCEPT_DNS_MSG)) {
+    if (!strstr(hdr, STR_ACCEPT_DNS_MSG)
+            && (!strstr(hdr, STR_ACCEPT_ANY))
+            ) {
         dohd_client_destroy(cd);
         return -1;
     }
@@ -628,14 +651,23 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
                 buff[ret] = 0;
                 if (dohd_request_post(cd, buff, ret) == 0)
                     DOH_Stats.http_post_requests++;
-                else
+                else {
                     DOH_Stats.http_notvalid_requests++;
+                }
             } else if (strncmp((char *)buff, "GET /?dns=", 10) == 0) {
                 buff[ret] = 0;
                 if (dohd_request_get(cd, buff, ret) == 0)
-                    DOH_Stats.http_post_requests++;
-                else
+                    DOH_Stats.http_get_requests++;
+                else {
                     DOH_Stats.http_notvalid_requests++;
+                }
+            } else if (strncmp((char *)buff, "HEAD /?dns=", 11) == 0) {
+                buff[ret] = 0;
+                if (dohd_request_get(cd, buff, ret) == 0)
+                    DOH_Stats.http_head_requests++;
+                else {
+                    DOH_Stats.http_notvalid_requests++;
+                }
 
             } else if (strncmp((char *)buff, STR_HTTP2_PREFACE, 24) == 0) {
                 if(dohd_request_http2(cd, buff, ret) == 0)
@@ -795,9 +827,34 @@ int main(int argc, char *argv[])
                 key = strdup(optarg);
                 break;
             case 'd':
-                /* TODO */
-                fprintf(stderr, "DNS server selection not available yet.\n");
-                exit(1);
+                {
+                    struct in_addr a4;
+                    struct in6_addr a6;
+                    if (inet_pton(AF_INET6, optarg, &a6) == 1) {
+                        struct sockaddr_in6 *sin = malloc(sizeof(struct sockaddr_in6));
+                        if (!sin) {
+                            fprintf(stderr, "Cannot allocate memory for DNS resolver '%s'\n", optarg);
+                            exit(2);
+                        }
+                        memcpy(&sin->sin6_addr.s6_addr, &a6, sizeof(struct in6_addr));
+                        sin->sin6_family = AF_INET6;
+                        sin->sin6_port = htons(53);
+                        Resolver[n_resolvers++] = (struct sockaddr *)sin;
+                    } else if (inet_pton(AF_INET, optarg, &a4) == 1) {
+                        struct sockaddr_in *sin = malloc(sizeof(struct sockaddr_in));
+                        if (!sin) {
+                            fprintf(stderr, "Cannot allocate memory for DNS resolver '%s'\n", optarg);
+                            exit(2);
+                        }
+                        memcpy(&sin->sin_addr.s_addr, &a4, sizeof(struct in_addr));
+                        sin->sin_family = AF_INET;
+                        sin->sin_port = htons(53);
+                        Resolver[n_resolvers++] = (struct sockaddr *)sin;
+                    } else {
+                        fprintf(stderr, "Error: invalid DNS resolver address '%s'\n", optarg);
+                        usage(argv[0]);
+                    }
+                }
                 break;
             case 'u':
                 if (getuid() != 0) {
@@ -817,6 +874,7 @@ int main(int argc, char *argv[])
     if (optind < argc)
         usage(argv[0]);
         /* implies exit() */
+
     if (!cert || !key)
         usage(argv[0]);
 
@@ -844,6 +902,23 @@ int main(int argc, char *argv[])
     dohprint_init(foreground, default_loglevel);
     dohprint(DOH_DEBUG, "Logging initialized.");
     dohprint(DOH_NOTICE, "dohd v. %s", VERSION);
+
+    /* Resolvers */
+    if (n_resolvers == 0) {
+        struct sockaddr_in6 *sin = malloc(sizeof(struct sockaddr_in6));
+        uint8_t localhost[16] = IP6_LOCALHOST;
+
+        if (!sin) {
+            fprintf(stderr, "Cannot allocate memory for DNS resolver '::1'\n");
+            exit(2);
+        }
+        memcpy(&sin->sin6_addr.s6_addr, localhost, sizeof(struct in6_addr));
+        sin->sin6_family = AF_INET6;
+        sin->sin6_port = htons(53);
+        Resolver[n_resolvers++] = (struct sockaddr *)sin;
+        dohprint(DOH_NOTICE, "Using default DNS server [::1]:53");
+    }
+    dohprint(DOH_NOTICE, "Using %u DNS servers", n_resolvers);
 
     /* Create listening socket */
     lfd = socket(AF_INET6, SOCK_STREAM, 0);
