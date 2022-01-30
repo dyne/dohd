@@ -145,7 +145,7 @@ static void printstats(void)
     dohprint(LOG_NOTICE, "- Connected clients:");
     dohprint(LOG_NOTICE, "    - Current: %u, peak: %u ", DOH_Stats.clients, DOH_Stats.max_clients);
     dohprint(LOG_NOTICE, "- Concurrent pending requests:");
-    dohprint(LOG_NOTICE, "    - Current: %u, peak: %u ", DOH_Stats.pending_requests, DOH_Stats.pending_requests);
+    dohprint(LOG_NOTICE, "    - Current: %u, peak: %u ", DOH_Stats.pending_requests, DOH_Stats.max_pending_requests);
     dohprint(LOG_NOTICE, "==================================");
 }
 
@@ -230,7 +230,6 @@ static void dohd_client_destroy(struct client_data *cd)
     struct req_slot *rp;
     if (!cd)
         return;
-    wolfSSL_write(cd->ssl, "HTTP/1.1 404 Not Found\r\n\r\n", 26);
     /* Delete from Clients */
     while (l) {
         if (cd == l) {
@@ -245,8 +244,6 @@ static void dohd_client_destroy(struct client_data *cd)
     }
     /* Shutdown TLS session */
     if (cd->ssl) {
-        if (cd->tls_handshake_done)
-            wolfSSL_shutdown(cd->ssl);
         wolfSSL_free(cd->ssl);
     }
     /* Close client socket descriptor */
