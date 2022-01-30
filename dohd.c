@@ -31,6 +31,7 @@
 #include <signal.h>
 #include <syslog.h>
 #include <pwd.h>
+#include <time.h>
 #include "libevquick.h"
 
 #define VERSION "v0.2"
@@ -79,6 +80,8 @@ static struct doh_stats {
     uint32_t pending_requests;
     uint32_t max_clients;
     uint32_t max_pending_requests;
+    /* Time */
+    time_t start_time;
 
 } DOH_Stats = {};
 
@@ -126,9 +129,43 @@ static void dohprint_init(int fg, int level)
         }\
     }
 
+#define UPTIME_STR_LEN 512
+static char uptime_string[UPTIME_STR_LEN];
+
+static char *uptime(void)
+{
+    time_t now = time(NULL);
+    time_t diff = (now - DOH_Stats.start_time);
+    time_t days, hrs, min, sec;
+
+    days = diff / (3600 * 24);
+    diff -= (days * 3600 * 24);
+
+    hrs = diff / (60 * 24);
+    diff -= (hrs * 60 * 24);
+
+    min = diff / 60;
+    diff -= (min * 60);
+
+    sec = diff;
+
+
+    uptime_string[0] = '\0';
+    if (days)
+        sprintf(uptime_string, "%lu days, %lu hours, %lu minutes %lu seconds", days, hrs, min, sec);
+    else if (hrs)
+        sprintf(uptime_string, "%lu hours, %lu minutes %lu seconds", hrs, min, sec);
+    else
+        sprintf(uptime_string, "%lu minutes %lu seconds", min, sec);
+
+    return uptime_string;
+}
+
+
 static void printstats(void)
 {
     dohprint(LOG_NOTICE, "DOHD session - detailed statistics");
+    dohprint(LOG_NOTICE, "dohd v. %s - running for %s", VERSION, uptime());
     dohprint(LOG_NOTICE, "==================================");
     dohprint(LOG_NOTICE, "- Session counters");
     dohprint(LOG_NOTICE, "    - Total DNS requests forwarded: %lu", DOH_Stats.tot_requests);
@@ -559,7 +596,7 @@ destroy:
  */
 static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused)) revents, void *arg)
 {
-    const size_t bufsz = 4096;
+    const size_t bufsz = 16 * 1024;
     uint8_t buff[bufsz];
     int ret;
     struct client_data *cd = arg;
@@ -800,6 +837,9 @@ int main(int argc, char *argv[])
     /* Set SIGUSR1 */
     sigset(SIGUSR1, sig_stats);
 
+    /* Time 0 */
+    DOH_Stats.start_time = time(NULL);
+
     /* Initialize logging */
     dohprint_init(foreground, default_loglevel);
     dohprint(DOH_DEBUG, "Logging initialized.");
@@ -859,6 +899,7 @@ int main(int argc, char *argv[])
 
     /* Initialize wolfSSL */
     wolfSSL_Init();
+
 
     /* Enable debug, if active */
     //wolfSSL_Debugging_ON();
