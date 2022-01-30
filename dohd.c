@@ -58,7 +58,7 @@
 #define DOH_DEBUG  LOG_DEBUG
 
 
-#define MAX_RESOLVERS 64
+#define MAX_RESOLVERS 256
 struct sockaddr *Resolver[MAX_RESOLVERS];
 unsigned n_resolvers = 0, resolver_rr = 0;
 
