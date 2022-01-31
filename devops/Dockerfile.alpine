@@ -1,0 +1,22 @@
+# docker build . -t dyne/dohd
+# docker run -p 8053:8053 -it dyne/dohd
+FROM wolfssl/wolfssl:alpine-lib as builder
+
+RUN apk add --no-cache gcc musl-dev linux-headers make unzip
+COPY wolfssl-5.1.1.zip .
+RUN unzip -q wolfssl-5.1.1.zip && cd wolfssl-5.1.1 \
+    && ./configure --enable-all && make && make install
+COPY src src
+RUN make -C src clean && make -C src && cp src/dohd /usr/bin/
+RUN apk update && apk add openssl \
+    && openssl req -nodes -newkey rsa:4096 -keyout /etc/test.key -out /etc/test.csr \
+    -subj "/C=IT/ST=Rome/L=Rome/O=Local Host/OU=Testing Department/CN=example.com" \
+    && openssl x509 -req -sha256 -days 365 \
+    -in /etc/test.csr -signkey /etc/test.key -out /etc/test.crt
+FROM wolfssl/wolfssl:alpine-lib
+COPY --from=builder /usr/bin/dohd /usr/bin/dohd
+COPY --from=builder /usr/local/lib/libwolfssl.so.30 /usr/lib/
+COPY --from=builder /etc/test.* /etc/
+RUN adduser -D -H -s /bin/false dohd
+RUN chown dohd:dohd /etc/test.*
+CMD dohd -c /etc/test.crt -k /etc/test.key -p 8053 -u dohd -F
