@@ -3,7 +3,7 @@
  *   (c) 2012 Daniele Lacamera <root@danielinux.net>
  *             see COPYING for more details
  */
-#include <sys/poll.h>
+
 #include <signal.h>
 #include <unistd.h>
 #include <stdio.h>

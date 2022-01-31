@@ -1,18 +1,13 @@
-CC ?= gcc
+export VERSION := 0.4.0-rc
 
-CFLAGS := -O3 -Wall -Wextra -Wno-sign-compare
+build:
+	make -C src
 
-VERSION := 0.3.1
+debug:
+	make -C src debug
 
-all: dohd
-
-debug: CFLAGS := -ggdb -DDEBUG_WOLFSSL
-debug: dohd
-
-dohd: dohd.o libevquick.o
-	gcc -o $@ $^ -lwolfssl -lrt -lm
 clean:
-	rm -f *.o dohd
+	make -C src clean
 
 docker-build:
 	docker build -f devops/Dockerfile . -t dyne/dohd:${VERSION}

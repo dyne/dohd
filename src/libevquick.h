@@ -5,7 +5,13 @@
  */
 #ifndef __LIBEVQUICK
 #define __LIBEVQUICK
+
+#ifndef _MUSL_
 #include <sys/poll.h>
+#else
+#include <poll.h>
+#endif
+
 #define EVQUICK_EV_READ POLLIN
 #define EVQUICK_EV_WRITE POLLOUT
 #define EVQUICK_EV_RETRIGGER 0x4000

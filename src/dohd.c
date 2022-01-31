@@ -34,8 +34,6 @@
 #include <time.h>
 #include "libevquick.h"
 
-#define VERSION "v0.3"
-
 #define DOH_PORT 8053
 #define DEC_BUFFER_MAXSIZE 1460
 
@@ -214,8 +212,9 @@ struct __attribute__((packed)) dns_header
 
 static int lfd = -1;
 static WOLFSSL_CTX *wctx = NULL;
+#ifndef _MUSL_
 void *sigset(int sig, void (*disp)(int));
-
+#endif
 
 struct req_slot {
     struct client_data *owner;
