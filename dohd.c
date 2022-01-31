@@ -989,7 +989,7 @@ int main(int argc, char *argv[])
     }
     dohprint(DOH_DEBUG, "SSL context initialized");
 
-    if (wolfSSL_CTX_use_certificate_file(wctx, cert, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
+    if (wolfSSL_CTX_use_certificate_chain_file(wctx, cert) != SSL_SUCCESS) {
         dohprint(LOG_ERR, "ERROR: failed to load %s, please check the file.\n", cert);
         return -1;
     }
