@@ -1,0 +1,60 @@
+name: Test functioning using example.com
+
+on: [push]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: build deps
+        run: |
+          sudo apt-get install --no-install-recommends -y -q libwolfssl-dev
+
+      - name: build
+        run: |
+          make
+
+      - name: self-sign certs
+        run: |
+          openssl req -nodes -newkey rsa:4096 -keyout test.key -out test.csr \
+          -subj "/C=IT/ST=Rome/L=Rome/O=Local Host/OU=Testing Department/CN=example.com" \
+          && openssl x509 -req -sha256 -days 365 \
+          -in test.csr -signkey test.key -out test.crt
+
+      - name: launch
+        run: |
+         ./dohd -c test.crt -k test.key -p 8053 -d 8.8.8.8 -F -v &
+
+      - name: download latest curl
+        uses: dsaltares/fetch-gh-release-asset@master
+        with:
+          repo: "moparisthebest/static-curl"
+          version: "tags/v7.81.0"
+          file: "curl-amd64"
+          target: "curl"
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: test dohd resolution of example.com
+        id: test
+        run: |
+          sudo chmod a+x ./curl
+          sleep 5
+          ./curl -s --doh-url https://127.0.0.1:8053 --doh-insecure https://example.com
+          echo "::set-output name=hash::$(./curl -s --doh-url https://127.0.0.1:8053 --doh-insecure https://example.com | sha256sum | cut -d' ' -f1 | xargs)"
+          echo "$(./curl -s --doh-url https://127.0.0.1:8053 --doh-insecure https://example.com | sha256sum | cut -d' ' -f1 | xargs)"
+
+      - name: check example hash
+        run: |
+          test ${{ steps.test.outputs.hash }} = ea8fac7c65fb589b0d53560f5251f74f9e9b243478dcb6b3ea79b5e36449c8d9
+

@@ -15,4 +15,4 @@ RUN openssl req -nodes -newkey rsa:4096 -keyout /etc/test.key -out /etc/test.csr
     && openssl x509 -req -sha256 -days 365 \
     -in /etc/test.csr -signkey /etc/test.key -out /etc/test.crt \
     && chown dohd:dohd /etc/test.*
-CMD /etc/init.d/named start && dohd -c /etc/test.crt -k /etc/test.key -p 8053 -u dohd -F -v
+CMD dohd -c /etc/test.crt -k /etc/test.key -p 8053 -u dohd -d 8.8.8.8 -F -v
