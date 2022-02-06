@@ -1,0 +1,3 @@
+[submodule "lib/ls-hpack"]
+	path = lib/ls-hpack
+	url = https://github.com/litespeedtech/ls-hpack.git
