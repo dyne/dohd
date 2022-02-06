@@ -33,16 +33,21 @@
 #include <pwd.h>
 #include <time.h>
 #include "libevquick.h"
+#include "lshpack.h"
+#include "xxhash.h"
 
 #define DOH_PORT 8053
 #define DEC_BUFFER_MAXSIZE 1460
 
-#define HTTP2_MODE 0 /* Change to '1' once implemented */
+#define LSHPACK_XXH_SEED 39378473
+
+#define HTTP2_MODE 1 /* Change to '1' once implemented */
 #define OCSP_RESPONDER 1
 
 #define IP6_LOCALHOST { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }
-#define DOHD_REQ_MIN 40
+#define DOHD_REQ_MIN 20
 #define STR_HTTP2_PREFACE "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
 #define STR_ACCEPT_DNS_MSG "Accept: application/dns-message"
 #define STR_ACCEPT_ANY     "Accept: */*"
 #define STR_CONTENT_LEN    "Content-Length: "
@@ -54,6 +59,14 @@
 #define DOH_NOTICE LOG_NOTICE
 #define DOH_INFO   LOG_INFO
 #define DOH_DEBUG  LOG_DEBUG
+
+#if (HTTP2_MODE)
+#   ifndef HAVE_ALPN
+#       error HAVE_ALPN needs to be defined to use HTTP/2
+#   endif
+#endif
+
+#define STR_TO_IOVEC(a) ((char *)a), (sizeof(a) -1)
 
 
 #define MAX_RESOLVERS 256
@@ -220,6 +233,7 @@ struct req_slot {
     struct client_data *owner;
     struct evquick_event *ev_dns;
     int dns_sd;
+    uint32_t h2_stream_id;
     uint16_t id;
     struct req_slot *next;
 };
@@ -228,6 +242,7 @@ struct client_data {
     WOLFSSL *ssl;
     struct evquick_event *ev_doh;
     int tls_handshake_done;
+    int h2;
     int doh_sd;
     struct client_data *next;
     struct req_slot *list;
@@ -301,7 +316,8 @@ static void dohd_client_destroy(struct client_data *cd)
         evquick_delevent(rp->ev_dns);
         free(rp);
         DOH_Stats.mem -= sizeof(struct req_slot);
-        DOH_Stats.pending_requests -= sizeof(struct req_slot);
+        if (DOH_Stats.pending_requests > 0)
+            DOH_Stats.pending_requests--;
         rp = rp->next;
     }
     /* Remove events from file desc */
@@ -325,7 +341,8 @@ static struct sockaddr *next_resolver(void)
 }
 
 
-void dns_send_request(struct client_data *cd, void *data, size_t size)
+void dns_send_request(struct client_data *cd, void *data, size_t size,
+        uint32_t stream_id)
 {
     int ret;
     struct req_slot *req = NULL, *l;
@@ -353,6 +370,9 @@ void dns_send_request(struct client_data *cd, void *data, size_t size)
 
     /* Create local dns socket */
     req->dns_sd = socket(resolver->sin_family, SOCK_DGRAM, 0);
+    if (cd->h2 && stream_id) {
+        req->h2_stream_id = stream_id;
+    }
     if (req->dns_sd < 0) {
         dohprint(DOH_ERR, "Failed to create traditional DNS socket to forward the request.");
         free(req);
@@ -426,54 +446,285 @@ static int dohd_request_post(struct client_data *cd, uint8_t *data, size_t len)
         return -1;
     }
     start_data += 4;
-    dns_send_request(cd, start_data, content_len);
+    dns_send_request(cd, start_data, content_len, 0);
     return 0;
 }
 
 static int dohd_request_get(struct client_data *cd, uint8_t *data,
-        size_t __attribute__((unused)) len)
+        size_t len, uint32_t stream_id)
 {
     char *hdr = (char *)data;
     char *start_data, *end_data;
     uint32_t outlen = DEC_BUFFER_MAXSIZE;
     uint8_t dec_buffer[DEC_BUFFER_MAXSIZE];
-    int ret;
+    int ret = -1;
+    size_t req_len;
 
-    if (!strstr(hdr, STR_ACCEPT_DNS_MSG)
+    if (!cd->h2 && !strstr(hdr, STR_ACCEPT_DNS_MSG)
             && (!strstr(hdr, STR_ACCEPT_ANY))
             ) {
         dohd_client_destroy(cd);
-        return -1;
+        ret =  -1;
+        goto end_request_get;
     }
     start_data = strstr(hdr, "?dns=");
     if (!start_data) {
         dohd_client_destroy(cd);
-        return -1;
+        ret =  -1;
+        goto end_request_get;
     }
     start_data += 5;
-    end_data = strchr(start_data, ' ');
-    if (!end_data) {
-        dohd_client_destroy(cd);
-        return -1;
+    if (cd->h2) {
+        end_data = ((char *)data) + len;
+        req_len = len;
+    } else {
+        end_data = strchr(start_data, ' ');
+        *end_data = 0;
+        req_len = strlen(start_data);
     }
-    *end_data = 0;
-    ret = Base64_Decode((uint8_t *)start_data, strlen(start_data), dec_buffer, &outlen);
+    ret = Base64_Decode((uint8_t *)start_data, req_len, dec_buffer, &outlen);
     if (ret != 0) {
         dohd_client_destroy(cd);
-        return -1;
+        ret =  -1;
+        goto end_request_get;
     }
     start_data = (char *)dec_buffer;
-    dns_send_request(cd, start_data, (end_data - start_data));
-    return 0;
+    dns_send_request(cd, start_data, (end_data - start_data), stream_id);
+    ret =  0;
+end_request_get:
+    return ret;
+}
+
+#define HTTP2_FRAME_HDR_LEN 9
+#define HTTP2_MAX_FRAME_LEN 1400
+
+
+#define H2_DATA          0x00
+#define H2_HEADERS       0x01
+#define H2_PRIORITY      0x02
+#define H2_RST_STREAM    0x03
+#define H2_SETTINGS      0x04
+#define H2_PUSH_PROMISE  0x05
+#define H2_PING          0x06
+#define H2_GOAWAY        0x07
+#define H2_WINDOW_UPDATE 0x08
+#define H2_CONTINUATION  0x09
+#define H2_NONE          0x0a
+
+#define H2_FLAG_ACK             0x01 /* in SETTINGS 0x01 is ACK */
+#define H2_FLAG_END_STREAM      0x01 /* other context: 0x01 is END_STREAM */
+#define H2_FLAG_END_HEADERS     0x04
+#define H2_FLAG_PADDED          0x08
+#define H2_FLAG_PRIORITY        0x20
+
+const char h2_type_names[11][15] =
+{
+    "DATA          ",
+    "HEADERS       ",
+    "PRIORITY      ",
+    "RST_STREAM    ",
+    "SETTINGS      ",
+    "PUSH_PROMISE  ",
+    "PING          ",
+    "GOAWAY        ",
+    "WINDOW_UPDATE ",
+    "CONTINUATION  ",
+    "NONE/INVALID  "
+
+};
+
+static inline const char *h2_frame_type(int type)
+{
+    if ((type < 1) || (type > H2_GOAWAY))
+        type = 0;
+    return h2_type_names[type];
+}
+struct h2_frame_info
+{
+    uint32_t id;
+    uint32_t len;
+    uint8_t type;
+    uint8_t flags;
+    uint8_t *payload;
+};
+
+static int h2_frame_get_info(struct h2_frame_info *h2, uint8_t *p)
+{
+    if (!h2)
+        return -1;
+    h2->len = (p[0] << 16) | (p[1] << 8) | (p[2]);
+    if (h2->len == 0) {
+        return -1;
+    }
+    h2->type = p[3];
+    if (h2->type >= H2_NONE)
+        return -1;
+    h2->flags = p[4];
+    h2->id = (p[5] << 24) | (p[6] << 16) | (p[7] << 8) | p[8];
+    h2->payload = p + HTTP2_FRAME_HDR_LEN;
+    return (int)h2->type;
+
+}
+
+static uint8_t *h2_frame_skip(uint8_t *p, uint8_t *end)
+{
+    struct h2_frame_info h2i;
+    if (p >= end)
+        return NULL;
+    if (h2_frame_get_info(&h2i, p) < 0)
+        return NULL;
+    if ((h2i.len == 0) || (h2i.len > HTTP2_MAX_FRAME_LEN))
+        return NULL;
+    if (h2i.payload + h2i.len >= end)
+        return NULL;
+    return h2i.payload + h2i.len;
+}
+
+static int h2_settings_ack(struct client_data *cd)
+{
+    uint8_t settings[] = {
+        0x00, 0x00, 0x00, H2_SETTINGS, H2_FLAG_ACK,
+        0x00, 0x00, 0x00, 0x00, /* ID = 0, settings are global */
+    };
+    return wolfSSL_write(cd->ssl, settings, HTTP2_FRAME_HDR_LEN);
+}
+
+static int
+decode_and_check_hashes (struct lshpack_dec *dec,
+        const unsigned char **src, const unsigned char *src_end,
+        struct lsxpack_header *xhdr)
+{
+    uint32_t hash;
+    int s;
+
+    s = lshpack_dec_decode(dec, src, src_end, xhdr);
+    if (s == 0)
+    {
+#if LSHPACK_DEC_CALC_HASH
+        assert(xhdr->flags & LSXPACK_NAME_HASH);
+#endif
+        if (xhdr->flags & LSXPACK_NAME_HASH)
+        {
+            hash = XXH32(lsxpack_header_get_name(xhdr), xhdr->name_len,
+                    LSHPACK_XXH_SEED);
+            assert(hash == xhdr->name_hash);
+        }
+
+#if LSHPACK_DEC_CALC_HASH
+        {
+            /* This is not required by the API, but internally, if the library
+             * calculates nameval hash, it should also set the name hash.
+             */
+            assert(xhdr->flags & LSXPACK_NAME_HASH);
+            assert(xhdr->flags & LSXPACK_NAMEVAL_HASH);
+        }
+#endif
+
+        if (xhdr->flags & LSXPACK_NAMEVAL_HASH)
+        {
+            hash = XXH32(lsxpack_header_get_name(xhdr), xhdr->name_len,
+                    LSHPACK_XXH_SEED);
+            hash = XXH32(lsxpack_header_get_value(xhdr), xhdr->val_len, hash);
+            assert(hash == xhdr->nameval_hash);
+        }
+    }
+    return s;
 }
 
 static int dohd_request_http2(struct client_data *cd, uint8_t *data,
-        size_t __attribute__((unused)) len)
+        size_t len)
 {
-    dohprint(DOH_DEBUG, "Received HTTP2 Request: %s\n", (char *)data);
-    /*TODO: implement HTTP2*/
-    dohd_client_destroy(cd);
-    return -1;
+    struct h2_frame_info h2i;
+    uint8_t *p, *end;
+    int ret;
+    if (strncmp((char *)data, STR_HTTP2_PREFACE, 24) == 0) {
+        wolfSSL_write(cd->ssl, STR_HTTP2_PREFACE, 24);
+        p = data + sizeof(STR_HTTP2_PREFACE);
+    } else {
+        p = data;
+    }
+    end = p + len;
+    while(p && (p < end) && h2_frame_get_info(&h2i, p) >= 0) {
+        dohprint(DOH_DEBUG, "H2: Frame %08X type %s len %u flags %02x",
+                h2i.id, h2_frame_type(h2i.type), h2i.len, h2i.flags);
+        switch(h2i.type) {
+            case H2_DATA:
+                {
+                    dns_send_request(cd, h2i.payload, h2i.len, h2i.id);
+                    ret = 0;
+                    break;
+                }
+            case H2_SETTINGS:
+                {
+                    uint16_t setting_id;
+                    uint32_t set_value;
+                    int i;
+                    for (i = 0; i < h2i.len; i+= (sizeof(uint16_t) + sizeof(uint32_t))) {
+                        setting_id = (h2i.payload[0] << 8) | h2i.payload[1];
+                        set_value = (h2i.payload[2] << 24) |
+                            (h2i.payload[3] << 16) | (h2i.payload[4] << 8) |
+                            h2i.payload[5];
+                        h2_settings_ack(cd);
+                        ret = 0;
+                    }
+                    (void) setting_id;
+                    (void) set_value;
+                    break;
+                }
+            case H2_HEADERS:
+                {
+                    int idx = 0;
+                    uint8_t pad_len = 0;
+                    uint8_t weight = 0;
+                    uint32_t stream_dep;
+                    struct lshpack_dec dec;
+                    struct lsxpack_header xhdr;
+                    int ret;
+                    uint8_t *data_ptr, *end_data_ptr;
+                    uint8_t out[1400];
+                    if ((h2i.flags & H2_FLAG_PADDED) == H2_FLAG_PADDED) {
+                        pad_len = h2i.payload[0];
+                        (void)pad_len;
+                        idx++;
+                    }
+                    if ((h2i.flags & H2_FLAG_PRIORITY) == H2_FLAG_PRIORITY) {
+                        stream_dep = (h2i.payload[idx++] & 0x7F) << 24;
+                        stream_dep += h2i.payload[idx++] << 16;
+                        stream_dep += h2i.payload[idx++] << 8;
+                        stream_dep += h2i.payload[idx++];
+                        weight = h2i.payload[idx++];
+                        (void)weight;
+                    }
+                    lshpack_dec_init(&dec);
+                    data_ptr = h2i.payload + idx;
+                    end_data_ptr = h2i.payload + h2i.len - idx;
+                    while (data_ptr < end_data_ptr) {
+                        lsxpack_header_prepare_decode(&xhdr, (char *)out, 0, sizeof(out));
+                        ret = decode_and_check_hashes(&dec, (const unsigned char **)&data_ptr, end_data_ptr,
+                                &xhdr);
+
+                        if (ret == 0) {
+                            char *val = xhdr.buf + xhdr.val_offset;
+                            if ((strncmp((char *)out, ":path:", 6) == 0) &&
+                                    (strncmp(val, "/?dns=", 6) == 0)) {
+                                ret = dohd_request_get(cd, (uint8_t *)val,
+                                        xhdr.val_len, h2i.id);
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    lshpack_dec_cleanup(&dec);
+                }
+                break;
+            case H2_GOAWAY:
+                dohd_client_destroy(cd);
+                return 1;
+
+        }
+        p = h2_frame_skip(p, end);
+    }
+    return ret;
 }
 
 /**
@@ -545,6 +796,100 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
     return min_ttl;
 }
 
+#define DOHD_MAX_REPLY 2048
+
+static inline void
+lsxpack_header_set_ptr(lsxpack_header_t *hdr,
+                       const char *name, size_t name_len,
+                       const char *val, size_t val_len, char *buf)
+{
+    memcpy(buf, name, name_len);
+    memcpy(&buf[name_len], val, val_len);
+    lsxpack_header_set_offset2(hdr, buf, 0, name_len, name_len, val_len);
+}
+
+
+static ssize_t h2_reply_pack_hdr(struct req_slot *req, uint8_t *reply, int age)
+{
+    ssize_t ret = -1;
+    uint32_t len = 0;
+    struct lshpack_enc enc;
+    lsxpack_header_t hdr;
+    uint8_t *pbuf;
+    char age_txt[64];
+    char tmp[DOHD_MAX_REPLY];
+    struct client_data *cd = req->owner;
+
+    if ((!cd) || (age < 0))
+        return -1;
+
+    /* Prepare cache-control argument */
+    snprintf(age_txt, 64, "max-age=%d", age);
+
+    /* Set type, flags */
+    reply[3] = H2_HEADERS;
+    reply[4] = H2_FLAG_END_HEADERS;
+
+    /* Set stream ID stored during request */
+    reply[5] = (uint8_t)((req->h2_stream_id & 0x7F000000) >> 24);
+    reply[6] = (uint8_t)((req->h2_stream_id & 0x00FF0000) >> 16);
+    reply[7] = (uint8_t)((req->h2_stream_id & 0x0000FF00) >> 8);
+    reply[8] = (uint8_t) (req->h2_stream_id & 0x000000FF);
+
+
+    /* Encode headers */
+    lshpack_enc_init(&enc);
+    lshpack_enc_set_max_capacity(&enc, DOHD_MAX_REPLY - HTTP2_FRAME_HDR_LEN);
+    pbuf = reply + HTTP2_FRAME_HDR_LEN;
+
+    /* status :200 */
+    lsxpack_header_set_ptr(&hdr, STR_TO_IOVEC(":status"),
+            STR_TO_IOVEC("200"), tmp);
+    pbuf = lshpack_enc_encode(&enc, pbuf, reply + DOHD_MAX_REPLY, &hdr);
+    if (!pbuf)
+        goto enc_failure;
+
+    /* Cache control: max-age=... */
+    lsxpack_header_set_ptr(&hdr, STR_TO_IOVEC("cache-control"),
+            STR_TO_IOVEC(age_txt), tmp);
+    pbuf = lshpack_enc_encode(&enc, pbuf, reply + DOHD_MAX_REPLY, &hdr);
+    if (!pbuf)
+        goto enc_failure;
+
+    /* Server: dohd */
+    lsxpack_header_set_ptr(&hdr, STR_TO_IOVEC("server"),
+            STR_TO_IOVEC("dohd"), tmp);
+    pbuf = lshpack_enc_encode(&enc, pbuf, reply + DOHD_MAX_REPLY, &hdr);
+    if (!pbuf)
+        goto enc_failure;
+
+    /* Content-Type: application/dns-message */
+    lsxpack_header_set_ptr(&hdr, STR_TO_IOVEC("content-type"),
+            STR_TO_IOVEC("application/dns-message"), tmp);
+    pbuf = lshpack_enc_encode(&enc, pbuf, reply + DOHD_MAX_REPLY, &hdr);
+    if (!pbuf)
+        goto enc_failure;
+
+    ret = (ssize_t)(pbuf - reply);
+
+    /* Sanity check on size */
+    if (ret > DOHD_MAX_REPLY - HTTP2_FRAME_HDR_LEN) {
+        ret = -1;
+        goto enc_failure;
+    }
+
+    if (ret > 0) {
+        len = (uint32_t)(ret & 0x00FFFFFF);
+        /* Set length field */
+        reply[0] = (uint8_t)((len & 0xFF0000) >> 16);
+        reply[1] = (uint8_t)((len & 0xFF00) >> 8);
+        reply[2] = (uint8_t)(len & 0xFF);
+    }
+enc_failure:
+    lshpack_enc_cleanup(&enc);
+    return ret;
+}
+
 
 /**
  * Receive a reply from DNS server and forward to DoH client. Close request.
@@ -552,9 +897,9 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
 static void dohd_reply(int fd, short __attribute__((unused)) revents,
         void *arg)
 {
-    const size_t bufsz = 2048;
-    uint8_t buff[bufsz];
-    char reply[bufsz];
+    const size_t bufsz = DOHD_MAX_REPLY;
+    uint8_t buff[DOHD_MAX_REPLY];
+    char reply[DOHD_MAX_REPLY];
     int hdrlen, len;
     struct client_data *cd, *l;
     int age = 0;
@@ -583,9 +928,37 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
 
     /* Fix records age and send answers to DoH client */
     age = dnsreply_min_age(buff, len);
-    hdrlen = snprintf(reply, bufsz, STR_REPLY, len, age);
-    memcpy(reply + hdrlen, buff, len);
-    reply[hdrlen + len] = 0;
+    if (cd->h2 != 0) {
+        /* Add headers */
+        hdrlen = h2_reply_pack_hdr(req, (unsigned char *)reply, age);
+        if (hdrlen <= 0)
+            goto destroy;
+        /* Add http2 data frame */
+        reply[hdrlen++] = (uint8_t)((len & 0xFF0000) >> 16);
+        reply[hdrlen++] = (uint8_t)((len & 0xFF00) >> 8);
+        reply[hdrlen++] = (uint8_t)(len & 0xFF);
+        reply[hdrlen++] = H2_DATA;
+        reply[hdrlen++] = H2_FLAG_END_STREAM;
+        reply[hdrlen++] = (uint8_t)((req->h2_stream_id & 0x7F000000) >> 24);
+        reply[hdrlen++] = (uint8_t)((req->h2_stream_id & 0x00FF0000) >> 16);
+        reply[hdrlen++] = (uint8_t)((req->h2_stream_id & 0x0000FF00) >> 8);
+        reply[hdrlen++] = (uint8_t)(req->h2_stream_id & 0x000000FF);
+        memcpy(reply + hdrlen, buff, len);
+
+#if 0
+        printf("final size for reply: %d bytes\n", hdrlen + len);
+        for (int i = 0; i < hdrlen+len; i++) {
+            printf ("%02x ", (uint8_t)(reply[i]));
+            if ((i % 16) == 15)
+                printf("\n");
+        }
+        printf("\n");
+#endif
+    } else {
+        hdrlen = snprintf(reply, bufsz, STR_REPLY, len, age);
+        memcpy(reply + hdrlen, buff, len);
+        reply[hdrlen + len] = 0;
+    }
     wolfSSL_write(cd->ssl, reply, hdrlen + len);
     DOH_Stats.tot_replies++;
 
@@ -608,7 +981,8 @@ destroy:
     free(req);
     /* Update statistics */
     DOH_Stats.mem -= sizeof(struct req_slot);
-    DOH_Stats.pending_requests--;
+    if (DOH_Stats.pending_requests > 0)
+        DOH_Stats.pending_requests--;
     check_stats();
 }
 
@@ -630,6 +1004,12 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
         if (ret != SSL_SUCCESS) {
             dohd_client_destroy(cd);
         } else {
+            uint16_t proto_len;
+            char *proto;
+            if (wolfSSL_ALPN_GetProtocol(cd->ssl, &proto, &proto_len) &&
+                    (2 == proto_len) && strncmp(proto, "h2", 2) == 0) {
+                cd->h2 = 1;
+            }
             cd->tls_handshake_done = 1;
         }
     } else {
@@ -639,11 +1019,16 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             dohd_client_destroy(cd);
             DOH_Stats.socket_errors++;
         } else {
-            if (ret < DOHD_REQ_MIN) {
+            if (cd->h2) {
+                ret = dohd_request_http2(cd, buff, ret);
+                if (ret > 0)
+                    DOH_Stats.http2_requests += ret;
+                else
+                    DOH_Stats.http_notvalid_requests++;
+            } else if (ret < DOHD_REQ_MIN) {
                 dohd_client_destroy(cd);
                 return;
-            }
-            if (strncmp((char*)buff, "POST /", 6) == 0) {
+            } else if (strncmp((char*)buff, "POST /", 6) == 0) {
                 /* Safety null-termination because
                  * dohd_request uses strstr() to parse
                  * the request */
@@ -655,24 +1040,18 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
                 }
             } else if (strncmp((char *)buff, "GET /?dns=", 10) == 0) {
                 buff[ret] = 0;
-                if (dohd_request_get(cd, buff, ret) == 0)
+                if (dohd_request_get(cd, buff, ret, 0) == 0)
                     DOH_Stats.http_get_requests++;
                 else {
                     DOH_Stats.http_notvalid_requests++;
                 }
             } else if (strncmp((char *)buff, "HEAD /?dns=", 11) == 0) {
                 buff[ret] = 0;
-                if (dohd_request_get(cd, buff, ret) == 0)
+                if (dohd_request_get(cd, buff, ret, 0) == 0)
                     DOH_Stats.http_head_requests++;
                 else {
                     DOH_Stats.http_notvalid_requests++;
                 }
-
-            } else if (strncmp((char *)buff, STR_HTTP2_PREFACE, 24) == 0) {
-                if(dohd_request_http2(cd, buff, ret) == 0)
-                    DOH_Stats.http2_requests++;
-                else
-                    DOH_Stats.http_notvalid_requests++;
             } else {
                 buff[ret] = 0;
                 DOH_Stats.http_notvalid_requests++;
@@ -745,13 +1124,14 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
         free(cd);
         return;
     }
+    /* Enable HTTP2 via ALPN */
+    if (wolfSSL_UseALPN(cd->ssl, "h2", 2, WOLFSSL_ALPN_CONTINUE_ON_MISMATCH)
+        != SSL_SUCCESS) {
+        dohprint(DOH_WARN, "WARNING: failed setting ALPN extension for http/2");
+    }
     /* Attach wolfSSL to the socket */
     wolfSSL_set_fd(cd->ssl, connd);
 
-#if (HTTP2_MODE)
-    /* Enable HTTP2 via ALPN */
-    wolfSSL_UseALPN(cd->ssl, "h2", 2, WOLFSSL_ALPN_CONTINUE_ON_MISMATCH);
-#endif
 
     cd->doh_sd = connd;
     cd->ev_doh = evquick_addevent(cd->doh_sd, EVQUICK_EV_READ, tls_read, tls_fail, cd);
