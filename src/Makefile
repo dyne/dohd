@@ -1,9 +1,8 @@
-CC ?= gcc
-CFLAGS := -O3 -Wall -Wextra -Wno-sign-compare \
- -DVERSION=\"${VERSION}\"  \
- -I../lib/ls-hpack -DXXH_HEADER_NAME=\"xxhash.h\" \
- -I../lib/ls-hpack/deps/xxhash \
- -I../lib
+CC = gcc
+#CFLAGS := -O3 -Wall -Wextra -Wno-sign-compare \
+
+CFLAGS := -O0 -ggdb -Wall -Wextra -Wno-sign-compare \
+ -DVERSION=\"${VERSION}\" 
 
 
 
@@ -14,7 +13,7 @@ all: dohd
 debug: CFLAGS := -ggdb -DDEBUG_WOLFSSL
 debug: dohd
 
-dohd: dohd.o libevquick.o ../lib/ls-hpack/lshpack.o ../lib/ls-hpack/deps/xxhash/xxhash.o
-	gcc -o $@ $^ -lwolfssl -lrt -lm
+dohd: dohd.o libevquick.o
+	gcc -o $@ $^ -lwolfssl -lrt -lm -lnghttp2
 clean:
 	rm -f *.o dohd
