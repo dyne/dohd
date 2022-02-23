@@ -1,8 +1,9 @@
 CC = gcc
-#CFLAGS := -O3 -Wall -Wextra -Wno-sign-compare \
+#CFLAGS := -O0 -ggdb -Wall -Wextra -Wno-sign-compare \
 
-CFLAGS := -O0 -ggdb -Wall -Wextra -Wno-sign-compare \
- -DVERSION=\"${VERSION}\" 
+CFLAGS := -O3 -Wall -Wextra -Wno-sign-compare \
+ -DVERSION=\"${VERSION}\" \
+ -fsanitize=address
 
 
 
@@ -14,6 +15,6 @@ debug: CFLAGS := -ggdb -DDEBUG_WOLFSSL
 debug: dohd
 
 dohd: dohd.o libevquick.o
-	gcc -o $@ $^ -lwolfssl -lrt -lm -lnghttp2
+	gcc -o $@ $^ -lasan -lwolfssl -lrt -lm -lnghttp2
 clean:
 	rm -f *.o dohd
