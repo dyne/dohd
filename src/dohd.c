@@ -178,7 +178,6 @@ static char *uptime(void)
 
     sec = diff;
 
-
     uptime_string[0] = '\0';
     if (days)
         sprintf(uptime_string, "%lu days, %lu hours, %lu minutes %lu seconds", days, hrs, min, sec);
@@ -321,8 +320,10 @@ static void dohd_destroy_client(struct client_data *cd)
         prev = l;
         l = l->next;
     }
-    if (!found)
+    if (!found) {
+        dohprint(DOH_ERR, "BUG: Unexpected client_data ptr %p not in Clients list\n", cd);
         return;
+    }
     /* Shutdown TLS session */
     if (cd->ssl) {
         wolfSSL_free(cd->ssl);
@@ -379,7 +380,8 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     /* Check if the client already opened this stream */
     req = nghttp2_session_get_stream_user_data(cd->h2_session, stream_id);
     if (req) {
-        dohprint(LOG_WARNING, "W: request is not null for this stream id\n");
+        dohprint(DOH_WARN, "W: request is not null for this stream id\n");
+
     }
     req = malloc(sizeof(struct req_slot));
     if (req == NULL) {
@@ -394,7 +396,8 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
         req->resolver_sz = sizeof(struct sockaddr_in6);
 
     /* Create local dns socket */
-    req->dns_sd = socket(((struct sockaddr_in *)req->resolver)->sin_family, SOCK_DGRAM, 0);
+    req->dns_sd = socket(((struct sockaddr_in *)req->resolver)->sin_family,
+            SOCK_DGRAM, 0);
     if (req->dns_sd < 0) {
         dohprint(DOH_ERR, "Failed to create traditional DNS socket to forward the request.");
         free(req);
@@ -425,21 +428,21 @@ static int dns_send_request_h2(struct req_slot *req)
     if (hdr->qr != 0) {
         return -1;
     }
-    req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply, NULL, req);
-    ret = sendto(req->dns_sd, req->h2_request_buffer, req->h2_request_len, 0, (struct sockaddr *)req->resolver,
-            req->resolver_sz);
+    req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply,
+           NULL, req);
+    ret = sendto(req->dns_sd, req->h2_request_buffer, req->h2_request_len, 0,
+            (struct sockaddr *)req->resolver, req->resolver_sz);
     if (ret < 0) {
         dohprint(DOH_ERR, "Fatal error: could not reach any recursive resolver at address %s port 53: %s\n", "localhost", strerror(errno));
         exit(53);
     }
-    printf("Sent DNS request, len: %u\n", ret);
     check_stats();
     return 0;
 }
 
 
-struct req_slot *dns_send_request(struct client_data *cd, const void *data, size_t size)
-        
+struct req_slot *dns_send_request(struct client_data *cd, const void *data,
+        size_t size)
 {
     int ret;
     struct req_slot *req = NULL;
@@ -484,8 +487,10 @@ struct req_slot *dns_send_request(struct client_data *cd, const void *data, size
     /* Populate req structure */
     req->owner = cd;
     req->id = htons(hdr->id);
-    req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply, NULL, req);
-    ret = sendto(req->dns_sd, data, size, 0, (struct sockaddr *)resolver, sock_sz);
+    req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply,
+            NULL, req);
+    ret = sendto(req->dns_sd, data, size, 0, (struct sockaddr *)resolver,
+            sock_sz);
     if (ret < 0) {
         dohprint(DOH_ERR, "Fatal error: could not reach any recursive resolver at address %s port 53: %s\n", "localhost", strerror(errno));
         exit(53);
@@ -595,15 +600,17 @@ const char h2_type_names[11][15] =
 
 static ssize_t client_ssl_write(struct client_data *cd, const void *data, size_t len)
 {
+#ifdef VERBOSE_HTTP_DEBUG
     int i;
     uint8_t *reply = (uint8_t *)data;
-    printf("\n\nSSL Write: %lu bytes\n", len);
+    dohprint(DOH_NOTICE,"\n\nSSL Write: %lu bytes\n", len);
     for (i = 0; i < len; i++) {
-        printf ("%02x ", (reply[i]));
+        dohprint(DOH_NOTICE,"%02x ", (reply[i]));
         if ((i % 16) == 15)
-            printf("\n");
+            dohprint(DOH_NOTICE,"\n");
     }
-    printf("\n\n");
+    dohprint(DOH_NOTICE,"\n\n");
+#endif
     return wolfSSL_write(cd->ssl, data, len);
 }
 
@@ -676,7 +683,7 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
     return min_ttl;
 }
 
-#define DOHD_MAX_REPLY 2048
+#define DOHD_MAX_REPLY (DNS_BUFFER_MAXSIZE)
 
 static void dohd_destroy_request(struct req_slot *req)
 {
@@ -759,7 +766,6 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     struct client_data *cd, *l;
     int age = 0;
     struct req_slot *req;
-    int i;
     nghttp2_data_provider data_prd;
     req = (struct req_slot *)arg;
     cd = req->owner;
@@ -768,14 +774,6 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
         dohprint(DOH_ERR, "Error while receiving DNS reply: socket error %d\n", errno);
         goto destroy;
     }
-
-    printf("DohD Reply size: %d\n", len);
-    for (i = 0; i < len; i++) {
-        printf ("%02x ", (buff[i]));
-        if ((i % 16) == 15)
-            printf("\n");
-    }
-    printf("\n\n");
 
     /* Safety check: client data object must still be in the list,
      * or it may have been previously freed and thus is invalid.
@@ -796,11 +794,10 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     if (cd->h2 != 0) {
         const char max_age_tmpl[] = "max-age=%d";
         char max_age_txt[15];
-        printf("H2 Response\n");
         snprintf(max_age_txt, 40, max_age_tmpl, age);
         nghttp2_nv nva[] = {
             MAKE_NV(":status", "200"),
-            MAKE_NV("content-type", "application/dns"),
+            MAKE_NV("content-type", "application/dns-message"),
             MAKE_NV("server", "dohd"),
             MAKE_NV("cache-control", max_age_txt),
         };
@@ -813,9 +810,7 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
         req->h2_response_len = len;
         memset(&data_prd, 0, sizeof(data_prd));
         data_prd.source.ptr = req;
-        printf("alloc ptr data: %p\n", req->h2_response_data);
         data_prd.read_callback = h2_cb_req_submit;
-        printf("Submitting DATA\n");
         nghttp2_submit_response(req->owner->h2_session,
                 req->h2_stream_id, nva, 4, &data_prd);
 
@@ -842,7 +837,6 @@ static ssize_t h2_cb_send(nghttp2_session *session, const uint8_t *data,
     (void)session;
     (void)flags;
     int ret;
-    printf("Called send_callback\n");
     ret = client_ssl_write(cd, data, length);
 
     if (nghttp2_session_want_write(session)) {
@@ -857,7 +851,6 @@ static int h2_cb_on_data_chunk_recv(nghttp2_session *session, uint8_t flags,
 {
     struct req_slot *req;
     struct client_data *cd = (struct client_data *)user_data;
-    printf(" On data chunk\n");
     if (!(flags & NGHTTP2_FLAG_END_STREAM)) {
         return -1;
     }
@@ -866,20 +859,19 @@ static int h2_cb_on_data_chunk_recv(nghttp2_session *session, uint8_t flags,
     }
     req = nghttp2_session_get_stream_user_data(session, stream_id);
     if (!req) {
-        dohprint(LOG_WARNING, "H2: received bogus DATA not associated to requerst\n");
+        dohprint(DOH_WARN, "H2: received bogus DATA not associated to requerst\n");
         return -1;
     }
     if (req->owner != cd) {
-        dohprint(LOG_WARNING, "H2: received DATA chunk with wrong stream_id\n");
+        dohprint(DOH_WARN, "H2: received DATA chunk with wrong stream_id\n");
         return -1;
     }
     if (len > DNS_BUFFER_MAXSIZE) {
-        dohprint(LOG_WARNING, "H2: received DATA chunk too large (%lu)\n", len);
+        dohprint(DOH_WARN, "H2: received DATA chunk too large (%lu)\n", len);
         return -1;
     }
     memcpy(req->h2_request_buffer, data, len);
     req->h2_request_len = len;
-    printf("DATA req OK\n");
     return 0;
 }
 
@@ -889,7 +881,6 @@ static int h2_cb_on_frame_recv(nghttp2_session *session,
 {
     struct client_data *cd = (struct client_data *)user_data;
     (void)cd;
-    printf("Called frame recv callback\n");
     switch(frame->hd.type) {
         case NGHTTP2_DATA:
         case NGHTTP2_HEADERS:
@@ -901,19 +892,13 @@ static int h2_cb_on_frame_recv(nghttp2_session *session,
                 if ((!req)) {
                     return 0;
                 }
-                printf("Recv END STREAM frame type %02x len %lu stream %08x \n", 
-                        frame->hd.type, frame->hd.length, frame->hd.stream_id);
                 dns_send_request_h2(req);
             }
             break;
         case NGHTTP2_GOAWAY:
-            printf("Recv GOAWAY: %08x\n", frame->goaway.error_code);
             break;
         case NGHTTP2_RST_STREAM:
-            printf("Recv RST_STREAM: %08x\n", frame->rst_stream.error_code);
             break;
-        default:
-            printf("Recv %02X\n", frame->hd.type);
 
     }
     return 0;
@@ -929,9 +914,8 @@ static int h2_cb_on_stream_close(nghttp2_session *session, int32_t stream_id,
     if (cd != req->owner)
         return -1;
     (void)error_code;
-    printf("Stream close. User data: %p req: %p owner: %p\n", user_data, req, req->owner);
     if (req)  {
-        //dohd_destroy_request(req);
+        dohd_destroy_request(req);
         return 0;
     }
     return -1; 
@@ -961,7 +945,6 @@ static int h2_cb_on_header(nghttp2_session *session,
   const char GETDNS[] = "/?dns=";
   struct client_data *cd = (struct client_data *)user_data;
   struct req_slot *req;
-  uint8_t base64_req[DNS_BUFFER_MAXSIZE];
   int rv;
   (void)flags;
   (void)value;
@@ -982,8 +965,6 @@ static int h2_cb_on_header(nghttp2_session *session,
         if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
                         strlen(GETDNS)) == 0) && (valuelen < DNS_BUFFER_MAXSIZE)) {
             uint32_t outlen = DNS_BUFFER_MAXSIZE;
-            printf("Value: %s\n", value);
-            printf("Base64 str: %s\n", value + 6);
 
             rv = Base64_Decode(value + 6, valuelen - 6, req->h2_request_buffer, &outlen);
             if (rv != 0) {
@@ -1003,8 +984,7 @@ static int h2_cb_on_header(nghttp2_session *session,
  */
 static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused)) revents, void *arg)
 {
-    const size_t bufsz = 16 * 1024;
-    uint8_t buff[bufsz];
+    uint8_t buff[DNS_BUFFER_MAXSIZE];
     int ret;
     struct client_data *cd = arg, *l = Clients;
     if (!cd || !cd->ssl)
@@ -1045,9 +1025,10 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             }
             cd->tls_handshake_done = 1;
         }
+        return;
     }
     /* Read the client data into our buff array */
-    ret = wolfSSL_read(cd->ssl, buff, bufsz - 1);
+    ret = wolfSSL_read(cd->ssl, buff, DNS_BUFFER_MAXSIZE);
     if (ret < 0) {
         dohd_destroy_client(cd);
         DOH_Stats.socket_errors++;
@@ -1056,13 +1037,13 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             ssize_t readlen;
             readlen = nghttp2_session_mem_recv(cd->h2_session, buff, ret);
             if (readlen < 0) {
-                dohprint(LOG_WARNING, "NGHTTP2 error: %s\n", nghttp2_strerror((int)readlen));
+                dohprint(DOH_WARN, "NGHTTP2 error: %s\n", nghttp2_strerror((int)readlen));
                 return;
             }
             while (nghttp2_session_want_write(cd->h2_session)) {
                 ret = nghttp2_session_send(cd->h2_session);
                 if (ret < 0) {
-                    dohprint(LOG_WARNING, "NGHTTP2 error: %s\n", nghttp2_strerror((int)ret));
+                    dohprint(DOH_WARN, "NGHTTP2 error: %s\n", nghttp2_strerror((int)ret));
                 }
             }
         } else if (ret < DOHD_REQ_MIN) {
