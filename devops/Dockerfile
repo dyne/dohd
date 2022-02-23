@@ -4,7 +4,7 @@ FROM dyne/devuan:chimaera
 
 RUN apt-get update -y -q \
     && apt-get install --no-install-recommends -y -q libwolfssl-dev \
-    git gcc make libc6-dev bind9 daemontools gdb \
+    git gcc make libc6-dev bind9 daemontools gdb libnghttp2-dev \
     && apt-get clean && rm -rf /var/cache/apt
 COPY . dohd/
 WORKDIR dohd
