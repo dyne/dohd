@@ -19,7 +19,7 @@ jobs:
 
       - name: build deps
         run: |
-          sudo apt-get install --no-install-recommends -y -q libwolfssl-dev
+          sudo apt-get install --no-install-recommends -y -q libwolfssl-dev libnghttp2-dev
 
       - name: build
         run: |
