@@ -87,6 +87,7 @@ unsigned n_resolvers = 0, resolver_rr = 0;
 
 /* Resource statistics (memory, sockets, etc.) */
 
+
 static struct doh_stats {
     /* Total requests/replies served */
     uint64_t tot_requests;
@@ -95,9 +96,9 @@ static struct doh_stats {
     /* Requests divided by type */
     uint64_t http_post_requests;
     uint64_t http_get_requests;
-    uint64_t http_head_requests;
     uint64_t http_notvalid_requests;
-    uint64_t http2_requests;
+    uint64_t http2_post_requests;
+    uint64_t http2_get_requests;
     uint64_t socket_errors;
 
     /* Memory (current, peak) */
@@ -200,12 +201,12 @@ static void printstats(void)
     dohprint(LOG_NOTICE, "    - Total replies served        : %lu", DOH_Stats.tot_replies);
     dohprint(LOG_NOTICE, "- HTTPS Requests by type:");
     dohprint(LOG_NOTICE, "    - HTTP/1.1 GET : %lu", DOH_Stats.http_get_requests);
-    dohprint(LOG_NOTICE, "    - HTTP/1.1 HEAD: %lu", DOH_Stats.http_head_requests);
     dohprint(LOG_NOTICE, "    - HTTP/1.1 POST: %lu", DOH_Stats.http_post_requests);
-    dohprint(LOG_NOTICE, "    - HTTP/2       : %lu", DOH_Stats.http2_requests);
+    dohprint(LOG_NOTICE, "    - HTTP/2   GET : %lu", DOH_Stats.http2_get_requests);
+    dohprint(LOG_NOTICE, "    - HTTP/2   POST: %lu", DOH_Stats.http2_post_requests);
     dohprint(LOG_NOTICE, "- Failures:");
     dohprint(LOG_NOTICE, "    - Invalid HTTP requests: %lu", DOH_Stats.http_notvalid_requests);
-    dohprint(LOG_NOTICE, "    - Socket errors (incl. close): %lu", DOH_Stats.socket_errors);
+    dohprint(LOG_NOTICE, "    - Socket errors: %lu", DOH_Stats.socket_errors);
     dohprint(LOG_NOTICE, "- Memory usage:");
     dohprint(LOG_NOTICE, "    - Current: %lu Bytes, peak: %lu Bytes", DOH_Stats.mem, DOH_Stats.mem_peak);
     dohprint(LOG_NOTICE, "- Connected clients:");
@@ -280,23 +281,7 @@ static void dohd_listen_error(int __attribute__((unused)) fd,
 
 static void sig_stats(int __attribute__((unused)) signo)
 {
-    unsigned count_cl= 0, count_sock = 0;
-    struct client_data *cl;
-    struct req_slot *r;
     printstats();
-    cl = Clients;
-    while(cl) {
-        count_cl++;
-        r = cl->list;
-        while(r) {
-            count_sock++;
-            r = r->next;
-        }
-        cl = cl->next;
-    }
-    dohprint(DOH_NOTICE, "Temporary double check on lists:");
-    dohprint(DOH_NOTICE, "  - Clients: %u", count_cl);
-    dohprint(DOH_NOTICE, "  - UDP sockets (active requests): %u", count_sock);
 }
 
 
@@ -324,12 +309,6 @@ static void dohd_destroy_client(struct client_data *cd)
         dohprint(DOH_ERR, "BUG: Unexpected client_data ptr %p not in Clients list\n", cd);
         return;
     }
-    /* Shutdown TLS session */
-    if (cd->ssl) {
-        wolfSSL_free(cd->ssl);
-    }
-    /* Close client socket descriptor */
-    close(cd->doh_sd);
 
     /* Cleanup pending requests */
     rp = cd->list;
@@ -338,6 +317,7 @@ static void dohd_destroy_client(struct client_data *cd)
             close(rp->dns_sd);
         evquick_delevent(rp->ev_dns);
         if (rp->h2_response_data) {
+            DOH_Stats.mem -= rp->h2_response_len;
             free(rp->h2_response_data);
             rp->h2_response_data = NULL;
         }
@@ -352,6 +332,13 @@ static void dohd_destroy_client(struct client_data *cd)
     if (cd->ev_doh)
         evquick_delevent(cd->ev_doh);
 
+    /* Shutdown TLS session */
+    if (cd->ssl) {
+        wolfSSL_free(cd->ssl);
+    }
+    /* Close client socket descriptor */
+    close(cd->doh_sd);
+
     /* Delete http2 session if present */
     if (cd->h2_session)
         nghttp2_session_del(cd->h2_session);
@@ -363,6 +350,18 @@ static void dohd_destroy_client(struct client_data *cd)
     DOH_Stats.mem -= sizeof(struct client_data);
     DOH_Stats.clients--;
     check_stats();
+}
+
+static void clean_exit(int __attribute__((unused)) signo)
+{
+    struct client_data *cl = Clients;
+    while(cl) {
+        Clients = cl->next;
+        dohd_destroy_client(cl);
+        cl = Clients;
+    }
+    fprintf(stderr, "Cleanup, exiting...\n");
+    exit(0);
 }
 
 static struct sockaddr *next_resolver(void)
@@ -388,6 +387,7 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
         dohprint(DOH_ERR, "Failed to allocate memory for a new DNS request.");
         return req;
     }
+    check_stats();
     memset(req, 0, sizeof(struct req_slot));
     req->resolver = next_resolver();
     req->resolver_sz = sizeof(struct sockaddr_in);
@@ -540,7 +540,7 @@ static struct req_slot *dohd_request_post(struct client_data *cd,
     return dns_send_request(cd, start_data, content_len);
 }
 
-static struct req_slot *dohd_request_get(struct client_data *cd, 
+static struct req_slot *dohd_request_get(struct client_data *cd,
         const uint8_t *data, size_t len)
 {
     char *hdr = (char *)data;
@@ -705,6 +705,7 @@ static void dohd_destroy_request(struct req_slot *req)
     evquick_delevent(req->ev_dns);
     close(req->dns_sd);
     if (req->h2_response_data) {
+        DOH_Stats.mem -= req->h2_response_len;
         free(req->h2_response_data);
         req->h2_response_data = NULL;
     }
@@ -745,9 +746,11 @@ static ssize_t h2_cb_req_submit(nghttp2_session *session,
     if (length >= len) {
         memcpy(buf, data, len);
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        DOH_Stats.mem -= req->h2_response_len;
         free(req->h2_response_data);
         req->h2_response_data = NULL;
         req->h2_response_len = 0;
+        check_stats();
         return len;
     }
     return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
@@ -794,7 +797,7 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     if (cd->h2 != 0) {
         const char max_age_tmpl[] = "max-age=%d";
         char max_age_txt[15];
-        snprintf(max_age_txt, 40, max_age_tmpl, age);
+        snprintf(max_age_txt, 15, max_age_tmpl, age);
         nghttp2_nv nva[] = {
             MAKE_NV(":status", "200"),
             MAKE_NV("content-type", "application/dns-message"),
@@ -802,10 +805,12 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
             MAKE_NV("cache-control", max_age_txt),
         };
         req->h2_response_data = malloc(len);
+        check_stats();
         if (!req->h2_response_data) {
             dohprint(DOH_ERR, "Out-of-memory!\n");
             exit(1);
         }
+        DOH_Stats.mem += len;
         memcpy(req->h2_response_data, buff, len);
         req->h2_response_len = len;
         memset(&data_prd, 0, sizeof(data_prd));
@@ -872,6 +877,8 @@ static int h2_cb_on_data_chunk_recv(nghttp2_session *session, uint8_t flags,
     }
     memcpy(req->h2_request_buffer, data, len);
     req->h2_request_len = len;
+    DOH_Stats.http2_post_requests++;
+    check_stats();
     return 0;
 }
 
@@ -918,14 +925,14 @@ static int h2_cb_on_stream_close(nghttp2_session *session, int32_t stream_id,
         dohd_destroy_request(req);
         return 0;
     }
-    return -1; 
+    return -1;
 }
 
 
 
 static int h2_cb_on_begin_headers(nghttp2_session *session,
                                      const nghttp2_frame *frame,
-                                     void *user_data) 
+                                     void *user_data)
 {
     (void)session;
     (void)frame;
@@ -965,12 +972,14 @@ static int h2_cb_on_header(nghttp2_session *session,
         if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
                         strlen(GETDNS)) == 0) && (valuelen < DNS_BUFFER_MAXSIZE)) {
             uint32_t outlen = DNS_BUFFER_MAXSIZE;
-
             rv = Base64_Decode(value + 6, valuelen - 6, req->h2_request_buffer, &outlen);
             if (rv != 0) {
                 dohd_destroy_request(req);
+                return -1;
             }
             req->h2_request_len = outlen;
+            DOH_Stats.http2_get_requests++;
+            check_stats();
         }
     }
     break;
@@ -1066,13 +1075,6 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             else {
                 DOH_Stats.http_notvalid_requests++;
             }
-        } else if (strncmp((char *)buff, "HEAD /?dns=", 11) == 0) {
-            buff[ret] = 0;
-            if (dohd_request_get(cd, buff, ret) == 0)
-                DOH_Stats.http_head_requests++;
-            else {
-                DOH_Stats.http_notvalid_requests++;
-            }
         } else {
             buff[ret] = 0;
             DOH_Stats.http_notvalid_requests++;
@@ -1125,6 +1127,8 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     if (connd < 0) {
         dohprint(DOH_WARN, "Failed to accept the connection: %s\n\n", strerror(errno));
         free(cd);
+        DOH_Stats.mem -= sizeof(struct client_data);
+        check_stats();
         return;
     }
 #ifdef OCSP_RESPONDER
@@ -1145,6 +1149,8 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
         dohprint(DOH_ERR, "ERROR: failed to create WOLFSSL object\n");
         close(connd);
         free(cd);
+        DOH_Stats.mem -= sizeof(struct client_data);
+        check_stats();
         return;
     }
     /* Enable HTTP2 via ALPN */
@@ -1234,6 +1240,7 @@ int main(int argc, char *argv[])
                     struct in6_addr a6;
                     if (inet_pton(AF_INET6, optarg, &a6) == 1) {
                         struct sockaddr_in6 *sin = malloc(sizeof(struct sockaddr_in6));
+
                         if (!sin) {
                             fprintf(stderr, "Cannot allocate memory for DNS resolver '%s'\n", optarg);
                             exit(2);
@@ -1296,6 +1303,9 @@ int main(int argc, char *argv[])
 
     /* Set SIGUSR1 */
     sigset(SIGUSR1, sig_stats);
+
+    /* Set SIGINT */
+    sigset(SIGINT, clean_exit);
 
     /* Time 0 */
     DOH_Stats.start_time = time(NULL);
