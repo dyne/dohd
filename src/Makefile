@@ -1,13 +1,11 @@
-CC = gcc
+CC=gcc
+#CC = clang
 #CFLAGS := -O0 -ggdb -Wall -Wextra -Wno-sign-compare \
 
 CFLAGS := -O3 -Wall -Wextra -Wno-sign-compare \
- -DVERSION=\"${VERSION}\" \
- -fsanitize=address
+ -DVERSION=\"${VERSION}\" -fPIE -Wno-unused-function 
 
-
-
-#CFLAGS += $(if $(shell ldd /bin/ls | grep 'musl' | head -1 | cut -d ' ' -f1), -D_MUSL_,)
+CFLAGS += $(if $(shell ldd /bin/ls | grep 'musl' | head -1 | cut -d ' ' -f1), -D_MUSL_,)
 
 all: dohd
 
