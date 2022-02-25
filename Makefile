@@ -1,10 +1,12 @@
-export VERSION := 0.4.0-rc
-
+export VERSION := 0.5
 build:
 	make -C src
 
 debug:
 	make -C src debug
+
+dmalloc:
+	make -C src dmalloc
 
 clean:
 	make -C src clean

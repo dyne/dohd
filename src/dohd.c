@@ -35,6 +35,9 @@
 #include "libevquick.h"
 #include <nghttp2/nghttp2.h>
 #include <netinet/tcp.h>
+#ifdef DMALLOC
+#include "dmalloc.h"
+#endif
 
 #define DOH_PORT 8053
 #define DNS_BUFFER_MAXSIZE 1460
@@ -361,6 +364,9 @@ static void clean_exit(int __attribute__((unused)) signo)
         cl = Clients;
     }
     fprintf(stderr, "Cleanup, exiting...\n");
+#ifdef DMALLOC
+    dmalloc_shutdown();
+#endif
     exit(0);
 }
 
@@ -387,7 +393,6 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
         dohprint(DOH_ERR, "Failed to allocate memory for a new DNS request.");
         return req;
     }
-    check_stats();
     memset(req, 0, sizeof(struct req_slot));
     req->resolver = next_resolver();
     req->resolver_sz = sizeof(struct sockaddr_in);
@@ -411,6 +416,7 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     DOH_Stats.mem += sizeof(struct req_slot);
     DOH_Stats.pending_requests++;
     DOH_Stats.tot_requests++;
+    check_stats();
 
     /* Populate req structure */
     req->owner = cd;
@@ -821,6 +827,7 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
 
         nghttp2_session_send(req->owner->h2_session);
         /* Do not destroy request: not yet finished */
+        check_stats();
         return;
     }
 
@@ -1117,7 +1124,6 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     cd = malloc(sizeof(struct client_data));
     if (cd == NULL) {
         dohprint(DOH_ERR, "Failed to allocate memory for a new connection\n\n");
-
         return;
     }
 
@@ -1127,8 +1133,6 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     if (connd < 0) {
         dohprint(DOH_WARN, "Failed to accept the connection: %s\n\n", strerror(errno));
         free(cd);
-        DOH_Stats.mem -= sizeof(struct client_data);
-        check_stats();
         return;
     }
 #ifdef OCSP_RESPONDER
@@ -1149,8 +1153,6 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
         dohprint(DOH_ERR, "ERROR: failed to create WOLFSSL object\n");
         close(connd);
         free(cd);
-        DOH_Stats.mem -= sizeof(struct client_data);
-        check_stats();
         return;
     }
     /* Enable HTTP2 via ALPN */
@@ -1169,6 +1171,7 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
 
     DOH_Stats.mem += sizeof(struct client_data);
     DOH_Stats.clients++;
+    check_stats();
 }
 
 static void usage(const char *name)
