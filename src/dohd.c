@@ -309,7 +309,7 @@ static void dohd_destroy_client(struct client_data *cd)
         l = l->next;
     }
     if (!found) {
-        dohprint(DOH_ERR, "BUG: Unexpected client_data ptr %p not in Clients list\n", cd);
+        dohprint(DOH_ERR, "Unexpected client_data ptr %p not in Clients list\n", cd);
         return;
     }
 
@@ -741,8 +741,10 @@ static ssize_t h2_cb_req_submit(nghttp2_session *session,
     (void)session;
     (void)stream_id;
     (void)user_data;
-    if (!req->h2_response_data || !req->h2_response_len)
-        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    if (!req->h2_response_data || !req->h2_response_len) {
+        dohd_destroy_request(req);
+        return 0;
+    }
     len = req->h2_response_len;
     data = req->h2_response_data;
     if (!data) {
@@ -759,7 +761,7 @@ static ssize_t h2_cb_req_submit(nghttp2_session *session,
         check_stats();
         return len;
     }
-    return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    return 0;
 }
 
 /**
@@ -864,28 +866,32 @@ static int h2_cb_on_data_chunk_recv(nghttp2_session *session, uint8_t flags,
     struct req_slot *req;
     struct client_data *cd = (struct client_data *)user_data;
     if (!(flags & NGHTTP2_FLAG_END_STREAM)) {
-        return -1;
+        goto data_fail;
     }
     if (!cd) {
-        return -1;
+        return 0;
     }
     req = nghttp2_session_get_stream_user_data(session, stream_id);
     if (!req) {
-        dohprint(DOH_WARN, "H2: received bogus DATA not associated to requerst\n");
-        return -1;
+        dohprint(DOH_WARN, "H2: received bogus DATA not associated to request\n");
+        goto data_fail;
     }
     if (req->owner != cd) {
         dohprint(DOH_WARN, "H2: received DATA chunk with wrong stream_id\n");
-        return -1;
+        goto data_fail;
     }
     if (len > DNS_BUFFER_MAXSIZE) {
         dohprint(DOH_WARN, "H2: received DATA chunk too large (%lu)\n", len);
-        return -1;
+        goto data_fail;
     }
     memcpy(req->h2_request_buffer, data, len);
     req->h2_request_len = len;
     DOH_Stats.http2_post_requests++;
     check_stats();
+    return 0;
+
+data_fail:
+    dohd_destroy_client(cd);
     return 0;
 }
 
@@ -930,9 +936,8 @@ static int h2_cb_on_stream_close(nghttp2_session *session, int32_t stream_id,
     (void)error_code;
     if (req)  {
         dohd_destroy_request(req);
-        return 0;
     }
-    return -1;
+    return 0;
 }
 
 
@@ -972,8 +977,9 @@ static int h2_cb_on_header(nghttp2_session *session,
     req = nghttp2_session_get_stream_user_data(session, frame->hd.stream_id);
     if (!req) {
         req = dns_create_request_h2(cd, frame->hd.stream_id);
-        if (!req)
-            return -1;
+        if (!req) {
+            return 0;
+        }
     }
     if ((namelen == strlen(PATH)) && memcmp(PATH, name, namelen) == 0) {
         if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
@@ -982,7 +988,7 @@ static int h2_cb_on_header(nghttp2_session *session,
             rv = Base64_Decode(value + 6, valuelen - 6, req->h2_request_buffer, &outlen);
             if (rv != 0) {
                 dohd_destroy_request(req);
-                return -1;
+                return 0;
             }
             req->h2_request_len = outlen;
             DOH_Stats.http2_get_requests++;
