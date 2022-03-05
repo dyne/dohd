@@ -1078,14 +1078,14 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
              * dohd_request uses strstr() to parse
              * the request */
             buff[ret] = 0;
-            if (dohd_request_post(cd, buff, ret) == 0)
+            if (dohd_request_post(cd, buff, ret) != NULL)
                 DOH_Stats.http_post_requests++;
             else {
                 DOH_Stats.http_notvalid_requests++;
             }
         } else if (strncmp((char *)buff, "GET /?dns=", 10) == 0) {
             buff[ret] = 0;
-            if (dohd_request_get(cd, buff, ret) == 0)
+            if (dohd_request_get(cd, buff, ret) != NULL)
                 DOH_Stats.http_get_requests++;
             else {
                 DOH_Stats.http_notvalid_requests++;
