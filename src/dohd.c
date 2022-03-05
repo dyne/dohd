@@ -14,7 +14,8 @@
  *      You should have received a copy of the GNU Affero General Public
  *      License along with dohd.  If not, see <http://www.gnu.org/licenses/>.
  *
- *      Author: Daniele Lacamera <root@danielinux.net>
+ *      Authors: Daniele Lacamera <root@danielinux.net>
+ *               Denis "Jaromil" Roio <jaromil@dyne.org> 
  *
  */
 
@@ -32,15 +33,13 @@
 #include <pwd.h>
 #include <time.h>
 #include "libevquick.h"
+#include "url64.h"
 #include <nghttp2/nghttp2.h>
 #include <netinet/tcp.h>
+
 #ifdef DMALLOC
 #include "dmalloc.h"
 #endif
-
-// from url64.c
-extern int dohd_url64_decode(const char *src, uint8_t *dest, uint32_t *dest_len);
-extern int dohd_url64_check(const char *in);
 
 #define DOH_PORT 8053
 #define DNS_BUFFER_MAXSIZE 1460
@@ -56,10 +55,10 @@ extern int dohd_url64_check(const char *in);
 
 
 #define MAKE_NV(K, V)                                                          \
-  {                                                                            \
+{                                                                            \
     (uint8_t *)K, (uint8_t *)V, strlen(K), strlen(V),                          \
-        NGHTTP2_NV_FLAG_NONE                                                   \
-  }
+    NGHTTP2_NV_FLAG_NONE                                                   \
+}
 
 #define STR_ACCEPT_DNS_MSG "Accept: application/dns-message"
 #define STR_ACCEPT_ANY     "Accept: */*"
@@ -67,7 +66,7 @@ extern int dohd_url64_check(const char *in);
 #define STR_REPLY "HTTP/1.1 200 OK\r\nServer: dohd\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nCache-Control: max-age=%d\r\n\r\n"
 
 #define H2_DEFAULT_SETTINGS { 0x00, 0x03, 0x00, 0x00, 0x00, 0x64, \
-                              0x00, 0x04, 0x00, 0x00, 0xFF, 0xFF }
+    0x00, 0x04, 0x00, 0x00, 0xFF, 0xFF }
 
 #define H2_DEFAULT_SETTINGS_LEN (12)
 
@@ -156,14 +155,14 @@ static void dohprint_init(int fg, int level)
 }
 
 #define dohprint(lvl, ...) \
-    { \
-        if (dohprint_syslog) \
-            syslog(lvl, ##__VA_ARGS__); \
-        else if (lvl <= dohprint_loglevel) {\
-            fprintf(stderr, ##__VA_ARGS__); \
-            fprintf(stderr, "\n"); \
-        }\
-    }
+{ \
+    if (dohprint_syslog) \
+    syslog(lvl, ##__VA_ARGS__); \
+    else if (lvl <= dohprint_loglevel) {\
+        fprintf(stderr, ##__VA_ARGS__); \
+        fprintf(stderr, "\n"); \
+    }\
+}
 
 #define UPTIME_STR_LEN 512
 static char uptime_string[UPTIME_STR_LEN];
@@ -438,7 +437,7 @@ static int dns_send_request_h2(struct req_slot *req)
         return -1;
     }
     req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply,
-           NULL, req);
+            NULL, req);
     ret = sendto(req->dns_sd, req->h2_request_buffer, req->h2_request_len, 0,
             (struct sockaddr *)req->resolver, req->resolver_sz);
     if (ret < 0) {
@@ -519,7 +518,7 @@ static struct req_slot *dohd_request_post(struct client_data *cd,
     unsigned int content_len = 0;
     if (!strstr(hdr, STR_ACCEPT_DNS_MSG)
             && (!strstr(hdr, STR_ACCEPT_ANY))
-            ) {
+       ) {
         dohd_destroy_client(cd);
         return NULL;
     }
@@ -558,11 +557,10 @@ static struct req_slot *dohd_request_get(struct client_data *cd,
     uint8_t dec_buffer[DNS_BUFFER_MAXSIZE];
     struct req_slot *ret = NULL;
     int rv;
-    // size_t req_len;
 
     if (!cd->h2 && !strstr(hdr, STR_ACCEPT_DNS_MSG)
             && (!strstr(hdr, STR_ACCEPT_ANY))
-            ) {
+       ) {
         dohd_destroy_client(cd);
         goto end_request_get;
     }
@@ -573,16 +571,14 @@ static struct req_slot *dohd_request_get(struct client_data *cd,
     }
     start_data += 5;
     if(*start_data==0x0 || dohd_url64_check(start_data) == 0) {
-      dohd_destroy_client(cd);
-      goto end_request_get;
+        dohd_destroy_client(cd);
+        goto end_request_get;
     }
     if (cd->h2) {
         end_data = ((char *)data) + len;
-        // req_len = len;
     } else {
         end_data = strchr(start_data, ' ');
         *end_data = 0;
-        // req_len = strlen(start_data);
     }
     rv = dohd_url64_decode(start_data, dec_buffer, &outlen);
     if (rv != 0) {
@@ -681,11 +677,11 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
         if (len < 12)
             return min_ttl;
         ttl =       (record[6] << 24 ) +
-                    (record[7] << 16 ) +
-                    (record[8] << 8  ) +
-                     record[9];
+            (record[7] << 16 ) +
+            (record[8] << 8  ) +
+            record[9];
         datalen   = (record[10] << 8) +
-                     record[11];
+            record[11];
         if (len < (12U + datalen))
             return min_ttl;
         if (ttl && (ttl < min_ttl))
@@ -737,10 +733,10 @@ static void dohd_destroy_request(struct req_slot *req)
 }
 
 static ssize_t h2_cb_req_submit(nghttp2_session *session,
-                                  int32_t stream_id, uint8_t *buf,
-                                  size_t length, uint32_t *data_flags,
-                                  nghttp2_data_source *source,
-                                  void *user_data)
+        int32_t stream_id, uint8_t *buf,
+        size_t length, uint32_t *data_flags,
+        nghttp2_data_source *source,
+        void *user_data)
 {
     struct req_slot *req = source->ptr;
     uint8_t *data;
@@ -802,7 +798,7 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     while (l) {
         if (l == cd)
             break;
-       l = l->next;
+        l = l->next;
     }
     if (!l)
         goto destroy;
@@ -852,7 +848,7 @@ destroy:
 }
 
 static ssize_t h2_cb_send(nghttp2_session *session, const uint8_t *data,
-                             size_t length, int flags, void *user_data)
+        size_t length, int flags, void *user_data)
 {
     struct client_data *cd = (struct client_data *)user_data;
     (void)session;
@@ -932,7 +928,7 @@ static int h2_cb_on_frame_recv(nghttp2_session *session,
 }
 
 static int h2_cb_on_stream_close(nghttp2_session *session, int32_t stream_id,
-                                    uint32_t error_code, void *user_data)
+        uint32_t error_code, void *user_data)
 {
     struct client_data *cd = (struct client_data *)user_data;
     struct req_slot *req =
@@ -950,8 +946,8 @@ static int h2_cb_on_stream_close(nghttp2_session *session, int32_t stream_id,
 
 
 static int h2_cb_on_begin_headers(nghttp2_session *session,
-                                     const nghttp2_frame *frame,
-                                     void *user_data)
+        const nghttp2_frame *frame,
+        void *user_data)
 {
     (void)session;
     (void)frame;
@@ -967,48 +963,48 @@ static int h2_cb_on_header(nghttp2_session *session,
         size_t valuelen, uint8_t flags, void *user_data)
 {
 
-  const char PATH[] = ":path";
-  const char GETDNS[] = "/?dns=";
-  struct client_data *cd = (struct client_data *)user_data;
-  struct req_slot *req;
-  int rv;
-  (void)flags;
-  (void)value;
-  (void)valuelen;
+    const char PATH[] = ":path";
+    const char GETDNS[] = "/?dns=";
+    struct client_data *cd = (struct client_data *)user_data;
+    struct req_slot *req;
+    int rv;
+    (void)flags;
+    (void)value;
+    (void)valuelen;
 
-  switch (frame->hd.type) {
-  case NGHTTP2_HEADERS:
-    if (frame->headers.cat != NGHTTP2_HCAT_REQUEST) {
-      break;
-    }
-    req = nghttp2_session_get_stream_user_data(session, frame->hd.stream_id);
-    if (!req) {
-        req = dns_create_request_h2(cd, frame->hd.stream_id);
-        if (!req) {
-            return 0;
-        }
-    }
-    if ((namelen == strlen(PATH)) && memcmp(PATH, name, namelen) == 0) {
-        if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
-                        strlen(GETDNS)) == 0) && (valuelen < DNS_BUFFER_MAXSIZE)) {
-            uint32_t outlen = DNS_BUFFER_MAXSIZE;
-	    if(dohd_url64_check((const char*)(value + 6)) == 0) {
-	      dohd_destroy_request(req);
-	      return 0;
-	    }
-            rv = dohd_url64_decode((const char*)(value + 6), req->h2_request_buffer, &outlen);
-            if (rv != 0) {
-                dohd_destroy_request(req);
-                return 0;
+    switch (frame->hd.type) {
+        case NGHTTP2_HEADERS:
+            if (frame->headers.cat != NGHTTP2_HCAT_REQUEST) {
+                break;
             }
-            req->h2_request_len = outlen;
-            DOH_Stats.http2_get_requests++;
-            check_stats();
-        }
+            req = nghttp2_session_get_stream_user_data(session, frame->hd.stream_id);
+            if (!req) {
+                req = dns_create_request_h2(cd, frame->hd.stream_id);
+                if (!req) {
+                    return 0;
+                }
+            }
+            if ((namelen == strlen(PATH)) && memcmp(PATH, name, namelen) == 0) {
+                if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
+                                strlen(GETDNS)) == 0) && (valuelen < DNS_BUFFER_MAXSIZE)) {
+                    uint32_t outlen = DNS_BUFFER_MAXSIZE;
+                    if(dohd_url64_check((const char*)(value + 6)) == 0) {
+                        dohd_destroy_request(req);
+                        return 0;
+                    }
+                    rv = dohd_url64_decode((const char*)(value + 6), req->h2_request_buffer, &outlen);
+                    if (rv != 0) {
+                        dohd_destroy_request(req);
+                        return 0;
+                    }
+                    req->h2_request_len = outlen;
+                    DOH_Stats.http2_get_requests++;
+                    check_stats();
+                }
+            }
+            break;
     }
-    break;
-  }
-  return 0;
+    return 0;
 }
 
 /**
@@ -1025,7 +1021,7 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
     while (l) {
         if (l == cd)
             break;
-       l = l->next;
+        l = l->next;
     }
     if (!l)
         return;
@@ -1174,7 +1170,7 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     }
     /* Enable HTTP2 via ALPN */
     if (wolfSSL_UseALPN(cd->ssl, "h2", 2, WOLFSSL_ALPN_CONTINUE_ON_MISMATCH)
-        != SSL_SUCCESS) {
+            != SSL_SUCCESS) {
         dohprint(DOH_WARN, "WARNING: failed setting ALPN extension for http/2");
     }
     /* Attach wolfSSL to the socket */
@@ -1221,16 +1217,16 @@ int main(int argc, char *argv[])
     int foreground = 0;
     int default_loglevel = DOH_WARN;
     struct option long_options[] = {
-            {"help",0 , 0, 'h'},
-            {"version", 0, 0, 'V'},
-            {"cert", 1, 0, 'c' },
-            {"key", 1, 0, 'k'},
-            {"port", 1, 0, 'p'},
-            {"dnsserver", 1, 0, 'd'},
-            {"user", 1, 0, 'u'},
-            {"verbose", 0, 0, 'v'},
-            {"do-not-fork", 0, 0, 'F'},
-            {NULL, 0, 0, '\0' }
+        {"help",0 , 0, 'h'},
+        {"version", 0, 0, 'V'},
+        {"cert", 1, 0, 'c' },
+        {"key", 1, 0, 'k'},
+        {"port", 1, 0, 'p'},
+        {"dnsserver", 1, 0, 'd'},
+        {"user", 1, 0, 'u'},
+        {"verbose", 0, 0, 'v'},
+        {"do-not-fork", 0, 0, 'F'},
+        {NULL, 0, 0, '\0' }
     };
     while(1) {
         c = getopt_long(argc, argv, "hvVc:k:p:d:u:F" , long_options, &option_idx);
@@ -1304,7 +1300,7 @@ int main(int argc, char *argv[])
     }
     if (optind < argc)
         usage(argv[0]);
-        /* implies exit() */
+    /* implies exit() */
 
     if (!cert || !key)
         usage(argv[0]);
@@ -1431,7 +1427,7 @@ int main(int argc, char *argv[])
 
     /* Load server key into WOLFSSL_CTX */
     if (wolfSSL_CTX_use_PrivateKey_file(wctx, key, SSL_FILETYPE_PEM)
-        != SSL_SUCCESS) {
+            != SSL_SUCCESS) {
         dohprint(LOG_ERR, "ERROR: failed to load %s, please check the file.\n", key);
         return -1;
     }
