@@ -7,8 +7,8 @@ CFLAGS := -I../src -O0 -ggdb -Wall -Wextra -Wno-sign-compare \
 
 CFLAGS += $(if $(shell ldd /bin/ls | grep 'musl' | head -1 | cut -d ' ' -f1), -D_MUSL_,)
 
-base64: libevquick.o url64.o base64.o
-	${CC} -o dohd_base64_test url64.o libevquick.o base64.o ${LDFLAGS}
+url64: libevquick.o url64.o test_url64.o
+	${CC} -o dohd_url64_test url64.o libevquick.o test_url64.o ${LDFLAGS}
 
 # dohd_shared:
 # 	${CC} ${CFLAGS} -c -o dohd_shared.o ../src/dohd.c -DSHARED_LIB
@@ -21,4 +21,4 @@ libevquick.o: ../src/libevquick.c
 
 clean:
 	rm -f *.o
-	rm -f dohd_base64_test
+	rm -f dohd_url64_test

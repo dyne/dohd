@@ -19,3 +19,7 @@ docker-build-alpine:
 
 docker-run:
 	docker run -it -p 8053:8053 dyne/dohd:${VERSION} ${CMD}
+
+check:
+	make -C test
+	./test/dohd_url64_test

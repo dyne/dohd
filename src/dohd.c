@@ -40,6 +40,7 @@
 
 // from url64.c
 extern int dohd_url64_decode(const char *src, uint8_t *dest, uint32_t *dest_len);
+extern int dohd_url64_check(const char *in);
 
 #define DOH_PORT 8053
 #define DNS_BUFFER_MAXSIZE 1460
@@ -571,6 +572,10 @@ static struct req_slot *dohd_request_get(struct client_data *cd,
         goto end_request_get;
     }
     start_data += 5;
+    if(*start_data==0x0 || dohd_url64_check(start_data) == 0) {
+      dohd_destroy_client(cd);
+      goto end_request_get;
+    }
     if (cd->h2) {
         end_data = ((char *)data) + len;
         // req_len = len;
@@ -987,6 +992,10 @@ static int h2_cb_on_header(nghttp2_session *session,
         if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
                         strlen(GETDNS)) == 0) && (valuelen < DNS_BUFFER_MAXSIZE)) {
             uint32_t outlen = DNS_BUFFER_MAXSIZE;
+	    if(dohd_url64_check((const char*)(value + 6)) == 0) {
+	      dohd_destroy_request(req);
+	      return 0;
+	    }
             rv = dohd_url64_decode((const char*)(value + 6), req->h2_request_buffer, &outlen);
             if (rv != 0) {
                 dohd_destroy_request(req);
