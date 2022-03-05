@@ -18,7 +18,7 @@ dmalloc: CFLAGS+=-DDMALLOC -DDMALLOC_FUNC_CHECK
 dmalloc: LDFLAGS+=-ldmalloc
 dmalloc: dohd
 
-dohd: dohd.o libevquick.o
+dohd: url64.o libevquick.o dohd.o
 	gcc -o $@ $^ $(LDFLAGS)
 clean:
 	rm -f *.o dohd

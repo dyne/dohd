@@ -25,7 +25,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-#include <wolfssl/wolfcrypt/coding.h>
 #include <getopt.h>
 #include <libgen.h>
 #include <signal.h>
@@ -38,6 +37,9 @@
 #ifdef DMALLOC
 #include "dmalloc.h"
 #endif
+
+// from url64.c
+extern int dohd_url64_decode(const char *src, uint8_t *dest, uint32_t *dest_len);
 
 #define DOH_PORT 8053
 #define DNS_BUFFER_MAXSIZE 1460
@@ -555,7 +557,7 @@ static struct req_slot *dohd_request_get(struct client_data *cd,
     uint8_t dec_buffer[DNS_BUFFER_MAXSIZE];
     struct req_slot *ret = NULL;
     int rv;
-    size_t req_len;
+    // size_t req_len;
 
     if (!cd->h2 && !strstr(hdr, STR_ACCEPT_DNS_MSG)
             && (!strstr(hdr, STR_ACCEPT_ANY))
@@ -571,13 +573,13 @@ static struct req_slot *dohd_request_get(struct client_data *cd,
     start_data += 5;
     if (cd->h2) {
         end_data = ((char *)data) + len;
-        req_len = len;
+        // req_len = len;
     } else {
         end_data = strchr(start_data, ' ');
         *end_data = 0;
-        req_len = strlen(start_data);
+        // req_len = strlen(start_data);
     }
-    rv = Base64_Decode((uint8_t *)start_data, req_len, dec_buffer, &outlen);
+    rv = dohd_url64_decode(start_data, dec_buffer, &outlen);
     if (rv != 0) {
         dohd_destroy_client(cd);
         goto end_request_get;
@@ -985,7 +987,7 @@ static int h2_cb_on_header(nghttp2_session *session,
         if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
                         strlen(GETDNS)) == 0) && (valuelen < DNS_BUFFER_MAXSIZE)) {
             uint32_t outlen = DNS_BUFFER_MAXSIZE;
-            rv = Base64_Decode(value + 6, valuelen - 6, req->h2_request_buffer, &outlen);
+            rv = dohd_url64_decode((const char*)(value + 6), req->h2_request_buffer, &outlen);
             if (rv != 0) {
                 dohd_destroy_request(req);
                 return 0;
@@ -1179,6 +1181,8 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     DOH_Stats.clients++;
     check_stats();
 }
+
+#ifndef SHARED_LIB
 
 static void usage(const char *name)
 {
@@ -1441,3 +1445,5 @@ int main(int argc, char *argv[])
         closelog();
     return 0;
 }
+
+#endif
