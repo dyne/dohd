@@ -1,4 +1,4 @@
-/* dohd test unit for base64 decoding
+/* dohd test unit for url64 decoding
  *
  * Copyright (C) 2022 Dyne.org foundation
  *

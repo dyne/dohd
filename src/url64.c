@@ -1,3 +1,23 @@
+/* dohd url64 decoding
+ *
+ * Copyright (C) 2022 Dyne.org foundation
+ *
+ * This program is free software: you can redistribute it and/or
+ * modify it under the terms of the GNU Affero General Public License
+ * as published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public
+ * License along with this program.  If not, see
+ * <https://www.gnu.org/licenses/>.
+ *
+ */
+
 #include <inttypes.h>
 
 static const unsigned char asciitable[256] = {
@@ -22,7 +42,7 @@ static const unsigned char asciitable[256] = {
 // assumes null terminated string
 // no padding equals check (no modulo 4)
 // returns 0 if not base else length of base encoded string
-int doh_url64_check(const char *in) {
+int dohd_url64_check(const char *in) {
   if(!in) { return 0; }
   register int c;
   unsigned char *bufin;
