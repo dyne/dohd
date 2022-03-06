@@ -588,7 +588,7 @@ static struct req_slot *dohd_request_get(struct client_data *cd,
     }
     rv = dohd_url64_declen( rv );
     // maximum size of binary request is DNS_BUFFER_MAXSIZE
-    if(rv >= DNS_BUFFER_MAXSIZE) {
+    if(rv >= DNS_BUFFER_MAXSIZE || rv <= 12) {
         dohd_destroy_client(cd);
         goto end_request_get;
     }
