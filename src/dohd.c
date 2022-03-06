@@ -340,6 +340,7 @@ static void dohd_destroy_client(struct client_data *cd)
     /* Shutdown TLS session */
     if (cd->ssl) {
         wolfSSL_free(cd->ssl);
+        cd->ssl = NULL;
     }
     /* Close client socket descriptor */
     close(cd->doh_sd);
