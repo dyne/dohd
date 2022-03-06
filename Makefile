@@ -1,4 +1,4 @@
-export VERSION := 0.6
+export VERSION := 0.7
 build:
 	make -C src
 
