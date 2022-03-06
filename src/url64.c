@@ -39,6 +39,9 @@ static const unsigned char asciitable[256] = {
     64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64
 };
 
+// returns an estimation of the length of the data once decoded
+int dohd_url64_declen(int len) { return ((len + 3) >> 2) * 3; }
+
 // assumes null terminated string
 // no padding equals check (no modulo 4)
 // returns 0 if not base else length of base encoded string
@@ -53,7 +56,7 @@ int dohd_url64_check(const char *in) {
     return(c);
 }
 
-int dohd_url64_decode(const char *src, uint8_t *dest, uint32_t *dest_len) {
+int dohd_url64_decode(const char *src, uint8_t *dest) {
     register const unsigned char *bufin;
     register unsigned char *bufout;
     register int nprbytes;
@@ -82,6 +85,5 @@ int dohd_url64_decode(const char *src, uint8_t *dest, uint32_t *dest_len) {
 
     *(bufout++) = '\0';
     // return the length of decoded
-    *dest_len = bufout-(unsigned char*)dest-1;
-    return(0);
+    return(bufout-(unsigned char*)dest-1);
 }
