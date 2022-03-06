@@ -19,6 +19,7 @@
 
 #ifndef URL64_H_INCLUDED
 #define URL64_H_INCLUDED
-int dohd_url64_decode(const char *src, uint8_t *dest, uint32_t *dest_len);
+int dohd_url64_declen(int len);
+int dohd_url64_decode(const char *src, uint8_t *dest);
 int dohd_url64_check(const char *in);
 #endif

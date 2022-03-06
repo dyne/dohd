@@ -554,9 +554,9 @@ static struct req_slot *dohd_request_get(struct client_data *cd,
 {
     char *hdr = (char *)data;
     char *start_data, *end_data;
-    uint32_t outlen = DNS_BUFFER_MAXSIZE;
-    uint8_t dec_buffer[DNS_BUFFER_MAXSIZE];
+    uint8_t *dec_buffer;
     struct req_slot *ret = NULL;
+    uint32_t outlen;
     int rv;
 
     if (!cd->h2 && !strstr(hdr, STR_ACCEPT_DNS_MSG)
@@ -581,13 +581,26 @@ static struct req_slot *dohd_request_get(struct client_data *cd,
         end_data = strchr(start_data, ' ');
         *end_data = 0;
     }
-    rv = dohd_url64_decode(start_data, dec_buffer, &outlen);
-    if (rv != 0) {
+    rv = strlen(start_data);
+    if(rv < 4) { // minimum size of url64 enforced to 4 bytes
+        dohd_destroy_client(cd);
+        goto end_request_get; 
+    }
+    rv = dohd_url64_declen( rv );
+    // maximum size of binary request is DNS_BUFFER_MAXSIZE
+    if(rv >= DNS_BUFFER_MAXSIZE) {
         dohd_destroy_client(cd);
         goto end_request_get;
     }
-    start_data = (char *)dec_buffer;
+    dec_buffer = malloc( rv );
+    outlen = dohd_url64_decode(start_data, dec_buffer);
+    if (outlen <= 0) {
+        free(dec_buffer);
+        dohd_destroy_client(cd);
+        goto end_request_get;
+    }
     ret = dns_send_request(cd, dec_buffer, outlen);
+    free(dec_buffer);
 end_request_get:
     return ret;
 }
@@ -968,7 +981,6 @@ static int h2_cb_on_header(nghttp2_session *session,
     const char GETDNS[] = "/?dns=";
     struct client_data *cd = (struct client_data *)user_data;
     struct req_slot *req;
-    int rv;
     (void)flags;
     (void)value;
     (void)valuelen;
@@ -993,8 +1005,9 @@ static int h2_cb_on_header(nghttp2_session *session,
                         dohd_destroy_request(req);
                         return 0;
                     }
-                    rv = dohd_url64_decode((const char*)(value + 6), req->h2_request_buffer, &outlen);
-                    if (rv != 0) {
+                    outlen = dohd_url64_decode((const char*)(value + 6),
+					       req->h2_request_buffer);
+                    if (outlen <= 0) {
                         dohd_destroy_request(req);
                         return 0;
                     }
