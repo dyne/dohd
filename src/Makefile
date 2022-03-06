@@ -2,7 +2,7 @@ CC=gcc
 #CC = clang
 
 CFLAGS := -Wall -Wextra -Wno-sign-compare \
- -DVERSION=\"${VERSION}\" -fPIE -Wno-unused-function 
+ -DVERSION=\"${VERSION}\" -fPIE
 
 LDFLAGS:=-lwolfssl -lrt -lm -lnghttp2
 

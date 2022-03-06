@@ -21,4 +21,4 @@ libevquick.o: ../src/libevquick.c
 
 clean:
 	rm -f *.o
-	rm -f dohd_url64_test
+	rm -f dohd_url64_test dohd_base64_test
