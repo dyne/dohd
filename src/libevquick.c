@@ -270,8 +270,8 @@ static void rebuild_poll(CTX ctx)
         ctx->_array = NULL;
         free(ptr);
     }
-    ctx->pfd = malloc(sizeof(struct pollfd) * ctx->n_events);
-    ctx->_array = malloc(sizeof(evquick_event) * ctx->n_events);
+    ctx->pfd = malloc(sizeof(struct pollfd) * (ctx->n_events + 1));
+    ctx->_array = malloc(sizeof(evquick_event) * (ctx->n_events + 1));
 
     if ((!ctx->pfd) || (!ctx->_array)) {
         /* TODO: notify error, events are disabled.
@@ -286,7 +286,7 @@ static void rebuild_poll(CTX ctx)
     ctx->pfd[0].fd = ctx->time_machine[0];
     ctx->pfd[0].events = POLLIN;
 
-    while(e) {
+    while((e) && (i <= ctx->n_events)) {
         memcpy(ctx->_array + i, e, sizeof(evquick_event));
         ctx->pfd[i].fd = e->fd;
         ctx->pfd[i++].events = (e->events & (POLLIN | POLLOUT)) | (POLLHUP | POLLERR);
