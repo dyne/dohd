@@ -18,6 +18,10 @@ dmalloc: CFLAGS+=-DDMALLOC -DDMALLOC_FUNC_CHECK
 dmalloc: LDFLAGS+=-ldmalloc
 dmalloc: dohd
 
+asan: CFLAGS+=-fsanitize=address
+asan: LDFLAGS+=-fsanitize=address
+asan: dohd
+
 dohd: url64.o libevquick.o dohd.o
 	gcc -o $@ $^ $(LDFLAGS)
 clean:

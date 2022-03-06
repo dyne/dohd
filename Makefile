@@ -8,6 +8,9 @@ debug:
 dmalloc:
 	make -C src dmalloc
 
+asan:
+	make -C src asan
+
 clean:
 	make -C src clean
 
