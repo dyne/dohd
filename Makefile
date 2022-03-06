@@ -26,3 +26,13 @@ docker-run:
 check:
 	make -C test
 	./test/dohd_url64_test
+
+# requires https://github.com/DNS-OARC/flamethrower
+# default upstream GENERATOR: -g randomlabel lblsize=10 lblcount=4 count=1000
+check-flame: HOST ?= danielinux.net
+check-flame: PORT ?= 8053
+check-flame: CLIENTNUM ?= 3
+check-flame: GENERATOR ?= -g file -f ./test/domains.txt
+check-flame: METHOD ?= GET
+check-flame:
+	flame -P doh -M ${METHOD} -p ${PORT} ${HOST} ${GENERATOR}
