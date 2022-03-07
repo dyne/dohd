@@ -199,6 +199,7 @@ void evquick_delevent(CTX ctx, evquick_event *e)
 void evquick_delevent(evquick_event *e)
 #endif
 {
+    int deleted = 0;
     evquick_event *cur, *prev;
     if (!ctx)
         return ;
@@ -212,13 +213,16 @@ void evquick_delevent(evquick_event *e)
              else
                 prev->next = e->next;
             free(e);
+            deleted++;
             break;
         }
         prev = cur;
         cur = cur->next;
     }
-    ctx->n_events--;
-    LOOP_BREAK();
+    if (deleted) {
+        ctx->n_events--;
+        LOOP_BREAK();
+    }
 }
 
 static void timer_trigger(CTX ctx, evquick_timer *t, unsigned long long now,
@@ -270,8 +274,8 @@ static void rebuild_poll(CTX ctx)
         ctx->_array = NULL;
         free(ptr);
     }
-    ctx->pfd = malloc(sizeof(struct pollfd) * (ctx->n_events + 1));
-    ctx->_array = malloc(sizeof(evquick_event) * (ctx->n_events + 1));
+    ctx->pfd = malloc(sizeof(struct pollfd) * ctx->n_events);
+    ctx->_array = malloc(sizeof(evquick_event) * ctx->n_events);
 
     if ((!ctx->pfd) || (!ctx->_array)) {
         /* TODO: notify error, events are disabled.
@@ -286,7 +290,10 @@ static void rebuild_poll(CTX ctx)
     ctx->pfd[0].fd = ctx->time_machine[0];
     ctx->pfd[0].events = POLLIN;
 
-    while((e) && (i <= ctx->n_events)) {
+    while((e)) {
+        if (i >= ctx->n_events) {
+            break;
+        }
         memcpy(ctx->_array + i, e, sizeof(evquick_event));
         ctx->pfd[i].fd = e->fd;
         ctx->pfd[i++].events = (e->events & (POLLIN | POLLOUT)) | (POLLHUP | POLLERR);
