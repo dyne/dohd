@@ -1139,6 +1139,9 @@ int main(int argc, char *argv[])
     /* Set SIGINT */
     sigset(SIGINT, clean_exit);
 
+    /* Ignore SIGPIPE */
+    sigset(SIGPIPE, SIG_IGN);
+
     /* Time 0 */
     DOH_Stats.start_time = time(NULL);
 
