@@ -309,9 +309,12 @@ static void dohd_destroy_client(struct client_data *cd)
     /* Cleanup pending requests */
     rp = cd->list;
     while(rp) {
+        if (rp->ev_dns) {
+            evquick_delevent(rp->ev_dns);
+            rp->ev_dns = NULL;
+        }
         if (rp->dns_sd > 0)
             close(rp->dns_sd);
-        evquick_delevent(rp->ev_dns);
         if (rp->h2_response_data) {
             DOH_Stats.mem -= rp->h2_response_len;
             free(rp->h2_response_data);
@@ -325,8 +328,10 @@ static void dohd_destroy_client(struct client_data *cd)
         rp = nxt;
     }
     /* Remove events from file desc */
-    if (cd->ev_doh)
+    if (cd->ev_doh) {
         evquick_delevent(cd->ev_doh);
+        cd->ev_doh = NULL;
+    }
 
     /* Shutdown TLS session */
     if (cd->ssl) {
@@ -408,8 +413,6 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
 
     /* Update statistics */
     DOH_Stats.mem += sizeof(struct req_slot);
-    DOH_Stats.pending_requests++;
-    DOH_Stats.tot_requests++;
     check_stats();
 
     /* Populate req structure */
@@ -436,67 +439,10 @@ static int dns_send_request_h2(struct req_slot *req)
         dohprint(DOH_ERR, "Fatal error: could not reach any recursive resolver at address %s port 53: %s\n", "localhost", strerror(errno));
         exit(53);
     }
-    check_stats();
-    return 0;
-}
-
-
-struct req_slot *dns_send_request(struct client_data *cd, const void *data,
-        size_t size)
-{
-    int ret;
-    struct req_slot *req = NULL;
-    struct dns_header *hdr;
-    struct sockaddr_in *resolver = NULL;
-    socklen_t sock_sz = sizeof(struct sockaddr_in);
-
-    /* Parse DNS header: only check the qr flag. */
-    hdr = (struct dns_header *)data;
-    if (hdr->qr != 0) {
-        return NULL;
-    }
-    req = malloc(sizeof(struct req_slot));
-    if (req == NULL) {
-        dohprint(DOH_ERR, "Failed to allocate memory for a new DNS request.");
-        return req;
-    }
-    memset(req, 0, sizeof(struct req_slot));
-
-    resolver = (struct sockaddr_in *)next_resolver();
-
-    /* Change AF / socksize if IPV6 */
-    if (resolver->sin_family == AF_INET6)
-        sock_sz = sizeof(struct sockaddr_in6);
-
-    /* Create local dns socket */
-    req->dns_sd = socket(resolver->sin_family, SOCK_DGRAM, 0);
-    if (req->dns_sd < 0) {
-        dohprint(DOH_ERR, "Failed to create traditional DNS socket to forward the request.");
-        free(req);
-        return NULL;
-    }
-    /* append to list */
-    req->next = cd->list;
-    cd->list = req;
-
-    /* Update statistics */
-    DOH_Stats.mem += sizeof(struct req_slot);
     DOH_Stats.pending_requests++;
     DOH_Stats.tot_requests++;
-
-    /* Populate req structure */
-    req->owner = cd;
-    req->id = htons(hdr->id);
-    req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply,
-            NULL, req);
-    ret = sendto(req->dns_sd, data, size, 0, (struct sockaddr *)resolver,
-            sock_sz);
-    if (ret < 0) {
-        dohprint(DOH_ERR, "Fatal error: could not reach any recursive resolver at address %s port 53: %s\n", "localhost", strerror(errno));
-        exit(53);
-    }
     check_stats();
-    return req;
+    return 0;
 }
 
 static ssize_t client_ssl_write(struct client_data *cd, const void *data, size_t len)
@@ -603,7 +549,10 @@ static void dohd_destroy_request(struct req_slot *req)
         prev = rd;
         rd = rd->next;
     }
-    evquick_delevent(req->ev_dns);
+    if (req->ev_dns) {
+        evquick_delevent(req->ev_dns);
+        req->ev_dns = NULL;
+    }
     close(req->dns_sd);
     if (req->h2_response_data) {
         DOH_Stats.mem -= req->h2_response_len;
@@ -620,7 +569,6 @@ static void dohd_destroy_request(struct req_slot *req)
     DOH_Stats.mem -= sizeof(struct req_slot);
     if (DOH_Stats.pending_requests > 0)
         DOH_Stats.pending_requests--;
-    DOH_Stats.tot_replies++;
     check_stats();
 }
 
@@ -724,6 +672,7 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
 
         nghttp2_session_send(req->owner->h2_session);
         /* Do not destroy request: not yet finished */
+        DOH_Stats.tot_replies++;
         check_stats();
         return;
     }
@@ -776,10 +725,8 @@ static int h2_cb_on_data_chunk_recv(nghttp2_session *session, uint8_t flags,
     req->h2_request_len = len;
     DOH_Stats.http2_post_requests++;
     check_stats();
-    return 0;
 
 data_fail:
-    dohd_destroy_client(cd);
     return 0;
 }
 
@@ -799,7 +746,10 @@ static int h2_cb_on_frame_recv(nghttp2_session *session,
                 if ((!req)) {
                     return 0;
                 }
-                dns_send_request_h2(req);
+                if (req->h2_request_len > 0)
+                    dns_send_request_h2(req);
+                else
+                    dohd_destroy_request(req);
             }
             break;
         case NGHTTP2_GOAWAY:
@@ -869,6 +819,7 @@ static int h2_cb_on_header(nghttp2_session *session,
                 if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
                                 strlen(GETDNS)) == 0) && (valuelen < DNS_BUFFER_MAXSIZE)) {
                     uint32_t outlen = DNS_BUFFER_MAXSIZE;
+                    req->h2_request_len = 0;
                     if(dohd_url64_check((const char*)(value + 6)) == 0) {
                         dohd_destroy_request(req);
                         return 0;
@@ -1077,6 +1028,7 @@ int main(int argc, char *argv[])
     int option_idx;
     int c;
     int foreground = 0;
+    int yes = 1;
     int default_loglevel = DOH_WARN;
     struct option long_options[] = {
         {"help",0 , 0, 'h'},
@@ -1214,6 +1166,8 @@ int main(int argc, char *argv[])
 
     /* Create listening socket */
     lfd = socket(AF_INET6, SOCK_STREAM, 0);
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (char *) &yes, sizeof(int));
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, (char *) &yes, sizeof(int));
     if (lfd < 0) {
         dohprint(DOH_ERR, "ERROR: failed to create DoH socket\n");
         return -1;
