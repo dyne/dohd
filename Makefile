@@ -36,3 +36,6 @@ check-flame: GENERATOR ?= -g file -f ./test/domains.txt
 check-flame: METHOD ?= GET
 check-flame:
 	flame -P doh -M ${METHOD} -p ${PORT} ${HOST} ${GENERATOR}
+
+site:
+	npx docsify-cli serve ./docs

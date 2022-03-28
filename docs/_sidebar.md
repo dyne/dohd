@@ -1,0 +1,6 @@
+- [Home](/)
+- [Configuration](Configure.md)
+    - [Mozilla Firefox](/Configure?id=mozilla-firefox)
+    - [Google Chrome](/Configure?id=google-chrome)
+    - [Microsoft Edge](/Configure?id=microsoft-edge)
+    - [Brave](/Configure?id=brave)
