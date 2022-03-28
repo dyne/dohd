@@ -73,47 +73,10 @@ dohd -c /etc/test.crt -k /etc/test.key -p 8053 -d 8.8.8.8 -u dohd -F
 
 There are several browsers compatible with DNS over HTTPS (DoH). The instructions below let you setup their connection to our demo server dns.dyne.org in order to protect your DNS queries from privacy intrusions and tampering.
 
-## Mozilla Firefox
-
-1. Click the menu button.
-1. Select **Settings**.
-1. In the **General** menu, scroll down to access **Network Settings**.
-![firefox network settings](docs/firefox_net_set_1.jpg)
-1. Click on the **Settings** button.
-1. Click **Enable DNS over HTTPS**. Use provider **Custom** and write **https://dns.dyne.org**.
-![firefox enable dns over https](docs/firefox_net_set_2.jpg)
-1. Then go to Firefox [about:config](about:config)
-![firefox about config](docs/firefox_net_set_3.jpg)
-1. And search for **network.trr.mode** then set it to **2** (first) or **3** (only) (see [Only use TRR, never use the native resolver](https://wiki.mozilla.org/Trusted_Recursive_Resolver))
-![firefox trr set](docs/firefox_net_set_4.jpg)
-1. Enjoy DOHD! See it works from [about:networking](about:networking)
-![firefox dohd functioning](docs/firefox_net_set_5.jpg)
-
-More info available on [wiki.mozilla.org](https://wiki.mozilla.org/Trusted_Recursive_Resolver).
-
-## Google Chrome
-
-1. Click on the three-dot menu in your browser window.
-1. Select **Settings**.
-1. Scroll down to **Privacy and security** > **Security**.
-1. Scroll down and enable the **Use secure DNS** switch.
-1. Choose a service provider and write **https://dns.dyne.org**.
-
-## Microsoft Edge
-
-1. Go to `edge://settings/privacy`.
-1. Scroll down to the **Security** section.
-1. Make sure the **Use secure DNS** option is enabled.
-1. Choose a service provider and write **https://dns.dyne.org**.
-
-## Brave
-
-1. Click the menu button in your browser window.
-1. Navigate to **Settings**.
-1. On the left side of the menu, scroll down and click **Additional settings**.
-1. Navigate to **Privacy and security** > **Security**.
-1. Enable **Use secure DNS**.
-1. Click **With Custom** and write **https://dns.dyne.org**.
+- [Mozilla Firefox](https://dyne.github.io/dohd/#/Configure?id=mozilla-firefox)
+- [Google Chrome](https://dyne.github.io/dohd/#/Configure?id=google-chrome)
+- [Microsoft Edge](https://dyne.github.io/dohd/#/Configure?id=microsoft-edge)
+- [Brave](https://dyne.github.io/dohd/#/Configure?id=brave)
 
 
 ## dohd daemon
