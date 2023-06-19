@@ -4,17 +4,12 @@ There are several browsers compatible with DNS over HTTPS (DoH). This protocol l
 
 ## Mozilla Firefox
 
-1. Navigate to [about:preferences#general](about:preferences#general)
-1. Scroll down to access **Network Settings**.
-![DOHD Firefox 1](assets/firefox-step-1.png)
-1. Click on the **Settings** button.
-1. Click **Enable DNS over HTTPS**. Use provider **Custom** and write **https://dns.dyne.org**.
-![DOHD Firefox 2](assets/firefox-step-2.png)
-1. Then go to Firefox [about:config](about:config)
-1. And search for **network.trr.mode** then set it to **2** or **3** (meaning [Only use TRR, never use the native resolver](https://wiki.mozilla.org/Trusted_Recursive_Resolver))
-![DOHD Firefox 3](assets/firefox-step-3.png)
+1. Navigate to [about:preferences#privacy](about:preferences#privacy)
+1. Scroll down to access **DNS over HTTPS**.
+1. Under **Enable secure DNS using**, chose **Max Protection**.
+1. Under **Chose provider**, chose **Custom** and write **https://dns.dyne.org**.
 1. Enjoy DOHD! See it works from [about:networking](about:networking)
-![DOHD Firefox 4](assets/firefox-step-4.png)
+![DOHD Firefox 1](assets/firefox-step-1.jpg)
 
 ## Google Chrome
 
