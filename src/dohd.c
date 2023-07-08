@@ -767,7 +767,8 @@ static int h2_cb_on_stream_close(nghttp2_session *session, int32_t stream_id,
     struct client_data *cd = (struct client_data *)user_data;
     struct req_slot *req =
         nghttp2_session_get_stream_user_data(session, stream_id);
-
+    if (!req)
+        return -1;
     if (cd != req->owner)
         return -1;
     (void)error_code;
