@@ -8,7 +8,7 @@ RUN apt-get update -y -q \
     && apt-get clean && rm -rf /var/cache/apt
 COPY . dohd/
 WORKDIR dohd
-RUN make && cp src/dohd /usr/bin/
+RUN make clean && make && cp src/dohd /usr/bin/
 RUN adduser dohd --shell=/bin/false --no-create-home --disabled-password
 RUN openssl req -nodes -newkey rsa:4096 -keyout /etc/test.key -out /etc/test.csr \
     -subj "/C=IT/ST=Rome/L=Rome/O=Local Host/OU=Testing Department/CN=example.com" \
