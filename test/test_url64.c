@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 
-extern int dohd_url64_decode(const char *src, uint8_t *dest, uint32_t *dest_len);
+extern int dohd_url64_decode(const char *src, uint8_t *dest);
 
 static const int32_t hextable[] = {
   -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
@@ -63,14 +63,13 @@ static void buf2hex(char *dst, const uint8_t *buf, const size_t len) {
 }
 
 static int test_compare(const char *url64, const char *hex) {
-  uint32_t out_len = 128;
   uint8_t out_bin[128];
   char out_hex[256];
   int check_len = strlen(hex) / 2;
   fprintf(stderr,"%u %s\n",check_len, hex);
   char *check_bin = calloc(check_len+1, 1);
   hex2buf(check_bin, hex);
-  dohd_url64_decode(url64, out_bin, &out_len);
+  int out_len = dohd_url64_decode(url64, out_bin);
   if(out_len != check_len) return(0);
   if(memcmp(check_bin, out_bin, check_len) !=0) return(0);
   buf2hex(out_hex, out_bin, out_len);

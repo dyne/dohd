@@ -133,7 +133,7 @@ static void ctx_signal_dispatch(void)
     char chr = 't';
     while (c) {
         if (write(c->time_machine[1], &chr, 1) < 0) {
-            timer_on(c, 1);
+            /* best-effort wakeup */
         }
         c = c->next;
     }
@@ -148,8 +148,9 @@ static void sig_alrm_handler(int signo)
 #ifndef EVQUICK_PTHREAD
         if (ctx) {
             char c = 't';
-            if (write(ctx->time_machine[1], &c, 1) < 0)
-                timer_on(ctx, 1);
+            if (write(ctx->time_machine[1], &c, 1) < 0) {
+                /* best-effort wakeup */
+            }
         }
 #endif
     }
@@ -368,7 +369,17 @@ void evquick_deltimer(CTX ctx, evquick_timer *t)
 void evquick_deltimer(evquick_timer *t)
 #endif
 {
-    heap_delete(ctx->timers, t->id);
+#ifdef EVQUICK_PTHREAD
+    if (!ctx || !t)
+        return;
+    if (heap_delete(ctx->timers, t->id) == 0)
+        free(t);
+#else
+    if (!ctx || !t)
+        return;
+    if (heap_delete(ctx->timers, t->id) == 0)
+        free(t);
+#endif
 }
 
 CTX evquick_init(void)
@@ -388,7 +399,8 @@ CTX evquick_init(void)
         return NULL;
     if(pipe(ctx->time_machine) < 0)
         return NULL;
-    fcntl(ctx->time_machine[1], O_NONBLOCK, &yes);
+    (void)yes;
+    fcntl(ctx->time_machine[1], F_SETFL, O_NONBLOCK);
     ctx->n_events = 1;
     ctx->changed = 1;
     memset(&act, 0, sizeof(act));

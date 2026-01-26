@@ -264,6 +264,7 @@ struct client_data {
 
 static void dohd_reply(int fd, short __attribute__((unused)) revents,
         void *arg);
+static void dohd_destroy_request(struct req_slot *req);
 
 struct client_data *Clients = NULL;
 
@@ -303,7 +304,6 @@ static void dohd_destroy_client(struct client_data *cd)
     }
     if (!found) {
         dohprint(DOH_ERR, "Unexpected client_data ptr %p not in Clients list\n", cd);
-        return;
     }
 
     /* Cleanup pending requests */
@@ -436,8 +436,11 @@ static int dns_send_request_h2(struct req_slot *req)
     ret = sendto(req->dns_sd, req->h2_request_buffer, req->h2_request_len, 0,
             (struct sockaddr *)req->resolver, req->resolver_sz);
     if (ret < 0) {
-        dohprint(DOH_ERR, "Fatal error: could not reach any recursive resolver at address %s port 53: %s\n", "localhost", strerror(errno));
-        exit(53);
+        dohprint(DOH_ERR, "Resolver send failed: %s\n", strerror(errno));
+        DOH_Stats.socket_errors++;
+        check_stats();
+        dohd_destroy_request(req);
+        return -1;
     }
     DOH_Stats.pending_requests++;
     DOH_Stats.tot_requests++;
@@ -470,25 +473,73 @@ static ssize_t client_ssl_write(struct client_data *cd, const void *data, size_t
 static int dns_skip_question(uint8_t **record, int maxlen)
 {
     int skip = 0;
-    int incr;
-    if (maxlen < (int)(*record[0]) + DNSQ_SUFFIX_LEN)
-        return -1;
-    while (skip < maxlen) {
-        if (*record[0] == 0) {
-            *record += 1 + DNSQ_SUFFIX_LEN; /* Skip fixed-size query suffix (type+class) */
-            skip+= 1 + DNSQ_SUFFIX_LEN;
-            return skip;
+    size_t len = (size_t)maxlen;
+    uint8_t *cur = *record;
+    int consumed = 0;
+    while (len > 0) {
+        uint8_t c = *cur;
+        if ((c & 0xC0) == 0xC0) {
+            if (len < 2)
+                return -1;
+            cur += 2;
+            consumed += 2;
+            len -= 2;
+            break;
         }
-        incr = 1 + *record[0];
-        if (incr + skip > maxlen) {
+        if (c == 0) {
+            cur += 1;
+            consumed += 1;
+            len -= 1;
+            break;
+        }
+        if (c > 63 || len < (size_t)c + 1)
             return -1;
-        }
-        *record += incr;
-        skip += incr;
+        cur += c + 1;
+        consumed += c + 1;
+        len -= c + 1;
     }
+    if (len < DNSQ_SUFFIX_LEN)
+        return -1;
+    cur += DNSQ_SUFFIX_LEN;
+    consumed += DNSQ_SUFFIX_LEN;
+    *record = cur;
+    skip = consumed;
     return skip;
 }
 
+static int dns_skip_rr_name(uint8_t **record, size_t *len)
+{
+    uint8_t *cur = *record;
+    size_t remain = *len;
+    int consumed = 0;
+    while (remain > 0) {
+        uint8_t c = *cur;
+        if ((c & 0xC0) == 0xC0) {
+            if (remain < 2)
+                return -1;
+            cur += 2;
+            consumed += 2;
+            remain -= 2;
+            *record = cur;
+            *len = remain;
+            return consumed;
+        }
+        if (c == 0) {
+            cur += 1;
+            consumed += 1;
+            remain -= 1;
+            *record = cur;
+            *len = remain;
+            return consumed;
+        }
+        if (c > 63 || remain < (size_t)c + 1)
+            return -1;
+        cur += c + 1;
+        consumed += c + 1;
+        remain -= c + 1;
+    }
+    return -1;
+}
 
 static uint32_t dnsreply_min_age(const void *p, size_t len)
 {
@@ -512,20 +563,22 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
     for (i = 0; i < answers; i++) {
         uint32_t ttl;
         uint32_t datalen;
-        if (len < 12)
+        if (dns_skip_rr_name(&record, &len) < 0)
             return min_ttl;
-        ttl =       (record[6] << 24 ) +
-            (record[7] << 16 ) +
-            (record[8] << 8  ) +
+        if (len < 10)
+            return min_ttl;
+        ttl =       (record[4] << 24 ) +
+            (record[5] << 16 ) +
+            (record[6] << 8  ) +
+            record[7];
+        datalen   = (record[8] << 8) +
             record[9];
-        datalen   = (record[10] << 8) +
-            record[11];
-        if (len < (12U + datalen))
+        if (len < (10U + datalen))
             return min_ttl;
         if (ttl && (ttl < min_ttl))
             min_ttl = ttl;
-        record += 12 + datalen;
-        len -= datalen;
+        record += 10 + datalen;
+        len -= 10 + datalen;
     }
     return min_ttl;
 }
@@ -667,8 +720,12 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
         memset(&data_prd, 0, sizeof(data_prd));
         data_prd.source.ptr = req;
         data_prd.read_callback = h2_cb_req_submit;
-        nghttp2_submit_response(req->owner->h2_session,
-                req->h2_stream_id, nva, 4, &data_prd);
+        if (nghttp2_submit_response(req->owner->h2_session,
+                req->h2_stream_id, nva, 4, &data_prd) < 0) {
+            dohprint(DOH_WARN, "H2: submit response failed\n");
+            dohd_destroy_request(req);
+            return;
+        }
 
         nghttp2_session_send(req->owner->h2_session);
         /* Do not destroy request: not yet finished */
@@ -863,6 +920,9 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
         /* Establish TLS connection */
         ret = wolfSSL_accept(cd->ssl);
         if (ret != SSL_SUCCESS) {
+            int err = wolfSSL_get_error(cd->ssl, ret);
+            if (err == WOLFSSL_ERROR_WANT_READ || err == WOLFSSL_ERROR_WANT_WRITE)
+                return;
             dohd_destroy_client(cd);
         } else {
             uint16_t proto_len;
@@ -895,6 +955,8 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
     if (ret < 0) {
         dohd_destroy_client(cd);
         DOH_Stats.socket_errors++;
+    } else if (ret == 0) {
+        dohd_destroy_client(cd);
     } else {
         if (cd->h2) {
             ssize_t readlen;
@@ -910,7 +972,8 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
                 }
             }
         } else {
-            buff[ret] = 0;
+            if (ret < DNS_BUFFER_MAXSIZE)
+                buff[ret] = 0;
             DOH_Stats.http_notvalid_requests++;
             dohd_destroy_client(cd);
         }
@@ -965,6 +1028,8 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
 #ifdef OCSP_RESPONDER
     ret = recv(connd, httpreq, httpreq_size, MSG_PEEK | MSG_DONTWAIT);
     if (ret > 0) {
+        if ((size_t)ret >= httpreq_size)
+            ret = (int)httpreq_size - 1;
         httpreq[ret] = 0;
         if (strstr(httpreq, "POST /") != NULL) {
             dohprint(DOH_DEBUG, "HTTP REQ: %s\n", httpreq);
@@ -1071,6 +1136,10 @@ int main(int argc, char *argv[])
                 {
                     struct in_addr a4;
                     struct in6_addr a6;
+                    if (n_resolvers >= MAX_RESOLVERS) {
+                        fprintf(stderr, "Too many resolvers (max %d)\n", MAX_RESOLVERS);
+                        exit(2);
+                    }
                     if (inet_pton(AF_INET6, optarg, &a6) == 1) {
                         struct sockaddr_in6 *sin = malloc(sizeof(struct sockaddr_in6));
 
@@ -1156,6 +1225,10 @@ int main(int argc, char *argv[])
         struct sockaddr_in6 *sin = malloc(sizeof(struct sockaddr_in6));
         uint8_t localhost[16] = IP6_LOCALHOST;
 
+        if (n_resolvers >= MAX_RESOLVERS) {
+            fprintf(stderr, "Too many resolvers (max %d)\n", MAX_RESOLVERS);
+            exit(2);
+        }
         if (!sin) {
             fprintf(stderr, "Cannot allocate memory for DNS resolver '::1'\n");
             exit(2);
