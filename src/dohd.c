@@ -304,6 +304,7 @@ static void dohd_destroy_client(struct client_data *cd)
     }
     if (!found) {
         dohprint(DOH_ERR, "Unexpected client_data ptr %p not in Clients list\n", cd);
+        return;
     }
 
     /* Cleanup pending requests */
