@@ -375,7 +375,7 @@ void evquick_deltimer(evquick_timer *t)
     if (heap_delete(ctx->timers, t->id) == 0)
         free(t);
 #else
-    if (!ctx || !t)
+    if (!t)
         return;
     if (heap_delete(ctx->timers, t->id) == 0)
         free(t);
