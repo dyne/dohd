@@ -9,11 +9,15 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/epoll.h>
+#include <errno.h>
 #include "heap.h"
 #include "libevquick.h"
 #include <time.h>
 #include <fcntl.h>
 #include <assert.h>
+
+#define EVQUICK_MAX_EVENTS 256
 
 
 
@@ -34,6 +38,7 @@ struct evquick_event
 {
     int fd;
     short events;
+    int valid;   /* Flag to mark event as still active */
 #ifdef EVQUICK_PTHREAD
     void (*callback)(CTX ctx, int fd, short revents, void *arg);
     void (*err_callback)(CTX ctx, int fd, short revents, void *arg);
@@ -71,12 +76,10 @@ DECLARE_HEAP(evquick_timer_instance, expire)
 struct evquick_ctx
 {
     int time_machine[2];
-    int changed;
+    int epfd;                    /* epoll file descriptor */
     int n_events;
-    int last_served;
-    struct pollfd *pfd;
     struct evquick_event *events;
-    struct evquick_event *_array;
+    struct evquick_event *pending_free; /* Events to free after event batch */
     heap_evquick_timer_instance *timers;
     int giveup;
     timer_t timer_id;
@@ -173,6 +176,7 @@ evquick_event *evquick_addevent(int fd, short events,
 #endif
 {
     evquick_event *e;
+    struct epoll_event ev;
     if (!ctx)
         return NULL;
 
@@ -181,16 +185,24 @@ evquick_event *evquick_addevent(int fd, short events,
         return e;
     e->fd = fd;
     e->events = events;
+    e->valid = 1;
     e->callback = callback;
     e->err_callback = err_callback;
     e->arg = arg;
 
-    ctx->changed = 1;
+    /* Add to epoll */
+    ev.events = EPOLLIN | EPOLLHUP | EPOLLERR;
+    if (events & EVQUICK_EV_WRITE)
+        ev.events |= EPOLLOUT;
+    ev.data.ptr = e;
+    if (epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        free(e);
+        return NULL;
+    }
 
     e->next = ctx->events;
     ctx->events = e;
     ctx->n_events++;
-    LOOP_BREAK();
     return e;
 }
 
@@ -202,9 +214,15 @@ void evquick_delevent(evquick_event *e)
 {
     int deleted = 0;
     evquick_event *cur, *prev;
-    if (!ctx)
+    if (!ctx || !e)
         return ;
-    ctx->changed = 1;
+
+    /* Mark as invalid first (for O(1) check in event loop) */
+    e->valid = 0;
+
+    /* Remove from epoll */
+    epoll_ctl(ctx->epfd, EPOLL_CTL_DEL, e->fd, NULL);
+
     cur = ctx->events;
     prev = NULL;
     while(cur) {
@@ -213,7 +231,10 @@ void evquick_delevent(evquick_event *e)
                 ctx->events = e->next;
              else
                 prev->next = e->next;
-            free(e);
+            /* Add to pending_free list instead of immediate free.
+             * This avoids use-after-free if event is in current epoll batch. */
+            e->next = ctx->pending_free;
+            ctx->pending_free = e;
             deleted++;
             break;
         }
@@ -222,7 +243,6 @@ void evquick_delevent(evquick_event *e)
     }
     if (deleted) {
         ctx->n_events--;
-        LOOP_BREAK();
     }
 }
 
@@ -256,80 +276,6 @@ static unsigned long long gettimeofdayms(void)
     return ret;
 }
 
-static void rebuild_poll(CTX ctx)
-{
-    int i = 1;
-    evquick_event *e;
-    void *ptr = NULL;
-    if (!ctx)
-        return ;
-    e = ctx->events;
-
-    if (ctx->pfd) {
-        ptr = ctx->pfd;
-        ctx->pfd = NULL;
-        free(ptr);
-    }
-    if (ctx->_array) {
-        ptr = ctx->_array;
-        ctx->_array = NULL;
-        free(ptr);
-    }
-    ctx->pfd = malloc(sizeof(struct pollfd) * ctx->n_events);
-    ctx->_array = malloc(sizeof(evquick_event) * ctx->n_events);
-
-    if ((!ctx->pfd) || (!ctx->_array)) {
-        /* TODO: notify error, events are disabled.
-         * perhaps provide a context-wide callback for errors.
-         */
-        perror("MEMORY");
-        ctx->n_events = 1;
-        ctx->changed = 0;
-        return;
-    }
-
-    ctx->pfd[0].fd = ctx->time_machine[0];
-    ctx->pfd[0].events = POLLIN;
-
-    while((e)) {
-        if (i >= ctx->n_events) {
-            break;
-        }
-        memcpy(ctx->_array + i, e, sizeof(evquick_event));
-        ctx->pfd[i].fd = e->fd;
-        ctx->pfd[i++].events = (e->events & (POLLIN | POLLOUT)) | (POLLHUP | POLLERR);
-        e = e->next;
-    }
-    ctx->last_served = 1;
-    ctx->changed = 0;
-}
-
-
-static void serve_event(CTX ctx, int n)
-{
-    evquick_event *e = ctx->_array + n;
-    if (!ctx)
-        return ;
-    if (n >= ctx->n_events)
-        return;
-    if (e) {
-        ctx->last_served = n;
-        if ((ctx->pfd[n].revents & (POLLHUP | POLLERR)) && e->err_callback)
-#ifdef EVQUICK_PTHREAD
-            e->err_callback(ctx, e->fd, ctx->pfd[n].revents, e->arg);
-#else
-            e->err_callback(e->fd, ctx->pfd[n].revents, e->arg);
-#endif
-        else {
-#ifdef EVQUICK_PTHREAD
-            e->callback(ctx, e->fd, ctx->pfd[n].revents, e->arg);
-#else
-            e->callback(e->fd, ctx->pfd[n].revents, e->arg);
-#endif
-        }
-    }
-}
-
 
 
 
@@ -358,7 +304,6 @@ evquick_timer *evquick_addtimer(
     t->callback = callback;
     t->arg = arg;
     timer_trigger(ctx, t, now, now + t->interval);
-    ctx->changed = 1;
 
     return t;
 }
@@ -386,6 +331,7 @@ CTX evquick_init(void)
 {
     int yes = 1;
     struct sigaction act;
+    struct epoll_event ev;
 #ifdef EVQUICK_PTHREAD
     CTX ctx;
     pthread_mutex_init(&ctx_list_mutex, NULL);
@@ -401,8 +347,24 @@ CTX evquick_init(void)
         return NULL;
     (void)yes;
     fcntl(ctx->time_machine[1], F_SETFL, O_NONBLOCK);
+
+    /* Create epoll instance */
+    ctx->epfd = epoll_create1(0);
+    if (ctx->epfd < 0) {
+        perror("epoll_create1");
+        return NULL;
+    }
+
+    /* Add time_machine pipe to epoll for timer wakeups */
+    ev.events = EPOLLIN;
+    ev.data.ptr = NULL;  /* NULL ptr indicates time_machine */
+    if (epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, ctx->time_machine[0], &ev) < 0) {
+        perror("epoll_ctl time_machine");
+        close(ctx->epfd);
+        return NULL;
+    }
+
     ctx->n_events = 1;
-    ctx->changed = 1;
     memset(&act, 0, sizeof(act));
     act.sa_handler = sig_alrm_handler;
     act.sa_flags = SA_NODEFER;
@@ -464,50 +426,60 @@ void evquick_loop(CTX ctx)
 void evquick_loop(void)
 #endif
 {
-    int pollret, i;
+    struct epoll_event ep_events[EVQUICK_MAX_EVENTS];
+    int nfds, i;
+
     for(;;) {
         if (!ctx || ctx->giveup)
             break;
 
-        if (ctx->changed) {
-            rebuild_poll(ctx);
+        nfds = epoll_wait(ctx->epfd, ep_events, EVQUICK_MAX_EVENTS, 3600 * 1000);
+        if (nfds < 0) {
+            if (errno == EINTR)
+                continue;
+            /* Log error and continue instead of breaking */
+            perror("epoll_wait");
             continue;
         }
 
-        if (ctx->pfd == NULL) {
-            sleep(3600);
-            ctx->changed = 1;
-            continue;
-        }
+        for (i = 0; i < nfds; i++) {
+            evquick_event *e = ep_events[i].data.ptr;
 
-        pollret = poll(ctx->pfd, ctx->n_events, 3600 * 1000);
-        if (pollret <= 0)
-            continue;
+            /* NULL ptr means time_machine pipe for timer wakeups */
+            if (e == NULL) {
+                char discard;
+                read(ctx->time_machine[0], &discard, 1);
+                timer_check(ctx);
+                continue;
+            }
 
-        if ((ctx->pfd[0].revents & POLLIN) == POLLIN) {
-            char discard;
-            read(ctx->time_machine[0], &discard, 1);
-            timer_check(ctx);
-            continue;
-        }
-        if (ctx->n_events < 2)
-            continue;
+            /* O(1) check: skip if event was deleted by prior callback */
+            if (!e->valid)
+                continue;
 
-        for (i = ctx->last_served +1; i < ctx->n_events; i++) {
-            if (ctx->pfd[i].revents != 0) {
-                serve_event(ctx, i);
-                goto end_loop;
+            /* Handle error events */
+            if ((ep_events[i].events & (EPOLLHUP | EPOLLERR)) && e->err_callback) {
+#ifdef EVQUICK_PTHREAD
+                e->err_callback(ctx, e->fd, ep_events[i].events, e->arg);
+#else
+                e->err_callback(e->fd, ep_events[i].events, e->arg);
+#endif
+            } else {
+                /* Call normal callback for read/write or if no err_callback */
+#ifdef EVQUICK_PTHREAD
+                e->callback(ctx, e->fd, ep_events[i].events, e->arg);
+#else
+                e->callback(e->fd, ep_events[i].events, e->arg);
+#endif
             }
         }
-        for (i = 1; i <= ctx->last_served; i++) {
-            if (ctx->pfd[i].revents != 0) {
-                serve_event(ctx, i);
-                goto end_loop;
-            }
-        }
-    end_loop:
-        continue;
 
+        /* Free events that were deleted during this batch */
+        while (ctx->pending_free) {
+            evquick_event *e = ctx->pending_free;
+            ctx->pending_free = e->next;
+            free(e);
+        }
     } /* main loop */
     ctx_del(ctx);
     ctx = NULL;
