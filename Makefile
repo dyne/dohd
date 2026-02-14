@@ -13,6 +13,7 @@ asan:
 
 clean:
 	make -C src clean
+	make -C test clean
 
 docker-build:
 	docker build -f devops/Dockerfile . -t dyne/dohd:${VERSION}
@@ -23,9 +24,21 @@ docker-build-alpine:
 docker-run:
 	docker run -it -p 8053:8053 dyne/dohd:${VERSION} ${CMD}
 
+# Run all unit tests
 check:
-	make -C test
-	./test/dohd_url64_test
+	make -C test check
+
+# Run unit tests with ASAN (for leak detection)
+check-asan: asan
+	make -C test check
+
+# Run integration tests (requires running dohd instance)
+check-integration:
+	make -C test integration
+
+# Run valgrind leak detection test
+check-valgrind:
+	make -C test valgrind
 
 # requires https://github.com/DNS-OARC/flamethrower
 # default upstream GENERATOR: -g randomlabel lblsize=10 lblcount=4 count=1000
@@ -39,3 +52,6 @@ check-flame:
 
 site:
 	npx docsify-cli serve ./docs
+
+.PHONY: build debug dmalloc asan clean docker-build docker-build-alpine docker-run \
+        check check-asan check-integration check-valgrind check-flame site
