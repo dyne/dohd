@@ -47,3 +47,14 @@ test/dohd_base64_test
 # Tags file
 tags
 
+# Test binaries
+test/dohd_url64_test
+test/dohd_url64_extended_test
+test/dohd_heap_test
+test/dohd_dns_parser_test
+
+# Generated test certificates
+test/*.crt
+test/*.key
+test/*.pem
+

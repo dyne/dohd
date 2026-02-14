@@ -40,6 +40,25 @@ check-integration:
 check-valgrind:
 	make -C test valgrind
 
+# Stress tests (auto-launch dohd, bombard until failure)
+stress:
+	make -C test stress
+
+stress-escalate:
+	make -C test stress-escalate
+
+stress-flood:
+	make -C test stress-flood
+
+stress-chaos:
+	make -C test stress-chaos
+
+stress-all:
+	make -C test stress-all
+
+stress-asan:
+	make -C test stress-asan
+
 # requires https://github.com/DNS-OARC/flamethrower
 # default upstream GENERATOR: -g randomlabel lblsize=10 lblcount=4 count=1000
 check-flame: HOST ?= danielinux.net

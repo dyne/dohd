@@ -24,7 +24,7 @@ echo "Parallel connections: $PARALLEL"
 echo ""
 
 # Check if dohd is running
-if ! curl -s -k --http2 "https://$HOST:$PORT/dns-query?dns=$DNS_QUERY" >/dev/null 2>&1; then
+if ! curl -s -k --http2 "https://$HOST:$PORT/?dns=$DNS_QUERY" >/dev/null 2>&1; then
     echo "ERROR: Cannot connect to dohd at $HOST:$PORT"
     echo "Make sure dohd is running with test certificates"
     exit 1
@@ -36,7 +36,7 @@ do_request() {
     curl -s -k --http2 \
         --connect-timeout 5 \
         --max-time 10 \
-        "https://$HOST:$PORT/dns-query?dns=$DNS_QUERY" \
+        "https://$HOST:$PORT/?dns=$DNS_QUERY" \
         -o /dev/null \
         -w "%{http_code}" 2>/dev/null
 }

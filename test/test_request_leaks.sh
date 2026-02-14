@@ -28,7 +28,7 @@ echo ""
 
 # Check connectivity
 DNS_Q=${DNS_QUERIES[0]}
-if ! curl -s -k --http2 "https://$HOST:$PORT/dns-query?dns=$DNS_Q" >/dev/null 2>&1; then
+if ! curl -s -k --http2 "https://$HOST:$PORT/?dns=$DNS_Q" >/dev/null 2>&1; then
     echo "ERROR: Cannot connect to dohd at $HOST:$PORT"
     exit 1
 fi
@@ -59,7 +59,7 @@ for ((batch=1; batch<=ITERATIONS; batch++)); do
         # Rotate through different queries
         dns_q=${DNS_QUERIES[$((i % ${#DNS_QUERIES[@]}))]}
         curl -s -k --http2 \
-            "https://$HOST:$PORT/dns-query?dns=$dns_q" \
+            "https://$HOST:$PORT/?dns=$dns_q" \
             -o /dev/null &
     done
     wait
