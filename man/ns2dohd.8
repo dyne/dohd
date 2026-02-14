@@ -1,0 +1,79 @@
+.TH NS2DOHD 8 "February 2026" "dohd 0.8" "System Manager's Manual"
+.SH NAME
+\fBns2dohd\fR \- local DNS to DNS-over-HTTPS forwarding daemon
+.SH SYNOPSIS
+.B ns2dohd
+\-d
+.I doh_url
+[
+.B \-p
+.I port
+] [
+.B \-u
+.I user
+] [
+.B \-r
+.I resolver_ip
+] [
+.B \-A
+.I cafile
+] [
+.B \-F
+] [
+.B \-v
+] [
+.B \-V
+] [
+.B \-h
+]
+.SH DESCRIPTION
+.B ns2dohd
+listens on local UDP DNS (default 127.0.0.1:53), receives classic DNS requests from the host, and forwards them to a DoH endpoint over HTTP/2 using wolfSSL and nghttp2.
+.PP
+To avoid resolver recursion when the local host itself uses 127.0.0.1 as nameserver,
+.B ns2dohd
+uses a separate bootstrap DNS resolver (default 1.1.1.1) to resolve the DoH endpoint hostname.
+.SH OPTIONS
+.TP
+.BI \-d " doh_url"
+DoH endpoint URL (https://...). Mandatory.
+.TP
+.BI \-p " port"
+Local UDP listen port. Default: 53.
+.TP
+.BI \-u " user"
+Drop privileges to this user after binding sockets (when started as root).
+.TP
+.BI \-r " resolver_ip"
+Bootstrap DNS resolver IP used for resolving the DoH endpoint host. Default: 1.1.1.1.
+.TP
+.BI \-A " cafile"
+CA bundle file in PEM format.
+.TP
+.B \-F
+Run in foreground (do not daemonize).
+.TP
+.B \-v
+Verbose logging.
+.TP
+.B \-V
+Print version and exit.
+.TP
+.B \-h
+Print help and exit.
+.SH EXAMPLES
+Run as local DNS daemon and drop privileges to user \fB_dohd\fR:
+.PP
+.nf
+ ns2dohd -d https://dns.dyne.org/dns-query -u _dohd
+.fi
+.PP
+Use a custom bootstrap resolver:
+.PP
+.nf
+ ns2dohd -d https://dns.dyne.org/dns-query -r 9.9.9.9 -u _dohd
+.fi
+.SH SEE ALSO
+.BR dohd (8)
+.SH LICENSE
+GNU AGPLv3.
