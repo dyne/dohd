@@ -1378,12 +1378,17 @@ int main(int argc, char *argv[])
     dohprint(DOH_DEBUG, "Memory pools initialized: %d clients, %d requests",
              MAX_CLIENTS, MAX_REQUESTS);
 
-    /* Create and initialize WOLFSSL_CTX */
-    if ((wctx = wolfSSL_CTX_new(wolfTLSv1_2_server_method())) == NULL) {
+    /* Create and initialize WOLFSSL_CTX with TLS 1.3 */
+    if ((wctx = wolfSSL_CTX_new(wolfTLSv1_3_server_method())) == NULL) {
         dohprint(LOG_ERR, "ERROR: failed to create WOLFSSL_CTX\n");
         return -1;
     }
-    dohprint(DOH_DEBUG, "SSL context initialized");
+    dohprint(DOH_DEBUG, "SSL context initialized (TLS 1.3)");
+
+    /* Enable session tickets for faster reconnection (1-RTT resume) */
+    wolfSSL_CTX_set_session_cache_mode(wctx, WOLFSSL_SESS_CACHE_SERVER);
+    wolfSSL_CTX_set_timeout(wctx, 3600);  /* 1 hour session timeout */
+    dohprint(DOH_DEBUG, "TLS session tickets enabled");
 
     if (wolfSSL_CTX_use_certificate_chain_file(wctx, cert) != SSL_SUCCESS) {
         dohprint(LOG_ERR, "ERROR: failed to load %s, please check the file.\n", cert);
