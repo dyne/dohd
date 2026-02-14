@@ -243,7 +243,9 @@ void *sigset(int sig, void (*disp)(int));
 
 struct req_slot {
     struct client_data *owner;
+    int owner_fd;                   /* Client fd for safe lookup after owner may be freed */
     struct evquick_event *ev_dns;
+    evquick_timer *timeout_timer;   /* Request timeout timer */
     int dns_sd;
     uint32_t h2_stream_id;
     uint8_t h2_request_buffer[DNS_BUFFER_MAXSIZE];
@@ -357,6 +359,11 @@ static void dohd_destroy_client(struct client_data *cd)
     /* Cleanup pending requests */
     rp = cd->list;
     while(rp) {
+        /* Cancel timeout timer if pending */
+        if (rp->timeout_timer) {
+            evquick_deltimer(rp->timeout_timer);
+            rp->timeout_timer = NULL;
+        }
         if (rp->ev_dns) {
             evquick_delevent(rp->ev_dns);
             rp->ev_dns = NULL;
@@ -369,7 +376,7 @@ static void dohd_destroy_client(struct client_data *cd)
             rp->h2_response_data = NULL;
         }
         nxt = rp->next;
-        free(rp);
+        mempool_free(request_pool, rp);
         DOH_Stats.mem -= sizeof(struct req_slot);
         if (DOH_Stats.pending_requests > 0)
             DOH_Stats.pending_requests--;
@@ -414,6 +421,8 @@ static void clean_exit(int __attribute__((unused)) signo)
             struct req_slot *rp = cd->list;
             while (rp) {
                 struct req_slot *nxt = rp->next;
+                if (rp->timeout_timer)
+                    evquick_deltimer(rp->timeout_timer);
                 if (rp->ev_dns)
                     evquick_delevent(rp->ev_dns);
                 if (rp->dns_sd > 0)
@@ -493,9 +502,41 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
 
     /* Populate req structure */
     req->owner = cd;
+    req->owner_fd = cd->doh_sd;
     req->h2_stream_id = stream_id;
+    req->timeout_timer = NULL;
     nghttp2_session_set_stream_user_data(cd->h2_session, stream_id, req);
     return req;
+}
+
+/* DNS request timeout in milliseconds (5 seconds) */
+#define DNS_REQUEST_TIMEOUT_MS 5000
+
+/* Timeout callback - upstream DNS didn't respond in time */
+static void dns_request_timeout(void *arg)
+{
+    struct req_slot *req = (struct req_slot *)arg;
+    struct client_data *cd;
+
+    dohprint(DOH_WARN, "DNS request timeout (stream %u)", req->h2_stream_id);
+    DOH_Stats.socket_errors++;
+
+    /* Use owner_fd to safely look up if client still exists without
+     * dereferencing the potentially-freed owner pointer */
+    cd = client_hash_lookup(req->owner_fd);
+    if (cd && cd == req->owner && cd->h2_session) {
+        /* Send HTTP 504 Gateway Timeout to client */
+        nghttp2_nv nva[] = {
+            MAKE_NV(":status", "504"),
+            MAKE_NV("server", "dohd"),
+        };
+        nghttp2_submit_response(cd->h2_session, req->h2_stream_id, nva, 2, NULL);
+        nghttp2_session_send(cd->h2_session);
+    }
+
+    /* Timer already fired, clear it before destroy */
+    req->timeout_timer = NULL;
+    dohd_destroy_request(req);
 }
 
 static int dns_send_request_h2(struct req_slot *req)
@@ -518,6 +559,11 @@ static int dns_send_request_h2(struct req_slot *req)
         dohd_destroy_request(req);
         return -1;
     }
+
+    /* Start timeout timer - if upstream doesn't respond, return 504 */
+    req->timeout_timer = evquick_addtimer(DNS_REQUEST_TIMEOUT_MS, 0,
+            dns_request_timeout, req);
+
     DOH_Stats.pending_requests++;
     DOH_Stats.tot_requests++;
     check_stats();
@@ -663,20 +709,33 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
 
 static void dohd_destroy_request(struct req_slot *req)
 {
-    struct client_data *cd = req->owner;
+    struct client_data *cd;
     struct req_slot *rd, *prev = NULL;
-    /* Remove request from the list */
-    rd = cd->list;
-    while(rd) {
-        if (rd == req) {
-            if (prev)
-                prev->next = req->next;
-            else
-                cd->list = req->next;
-            break;
+
+    /* Use owner_fd to safely check if client still exists without
+     * dereferencing the potentially-freed owner pointer */
+    cd = client_hash_lookup(req->owner_fd);
+    int client_valid = (cd && cd == req->owner);
+
+    /* Remove request from the owner's list if client is still valid */
+    if (client_valid) {
+        rd = cd->list;
+        while(rd) {
+            if (rd == req) {
+                if (prev)
+                    prev->next = req->next;
+                else
+                    cd->list = req->next;
+                break;
+            }
+            prev = rd;
+            rd = rd->next;
         }
-        prev = rd;
-        rd = rd->next;
+    }
+    /* Cancel timeout timer if still pending */
+    if (req->timeout_timer) {
+        evquick_deltimer(req->timeout_timer);
+        req->timeout_timer = NULL;
     }
     if (req->ev_dns) {
         evquick_delevent(req->ev_dns);
@@ -689,8 +748,8 @@ static void dohd_destroy_request(struct req_slot *req)
         req->h2_response_data = NULL;
     }
 
-    if (req->owner->h2_session && req->h2_stream_id) {
-        nghttp2_session_set_stream_user_data(req->owner->h2_session,
+    if (client_valid && cd->h2_session && req->h2_stream_id) {
+        nghttp2_session_set_stream_user_data(cd->h2_session,
                 req->h2_stream_id, NULL);
     }
     mempool_free(request_pool, req);
@@ -751,6 +810,13 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     nghttp2_data_provider data_prd;
     req = (struct req_slot *)arg;
     cd = req->owner;
+
+    /* Cancel timeout timer - we got a response */
+    if (req->timeout_timer) {
+        evquick_deltimer(req->timeout_timer);
+        req->timeout_timer = NULL;
+    }
+
     len = recv(fd, buff, bufsz, 0);
     if (len < 16) {
         dohprint(DOH_ERR, "Error while receiving DNS reply: socket error %d\n", errno);
