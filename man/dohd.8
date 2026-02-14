@@ -1,0 +1,75 @@
+.TH DOHD 8 "February 2026" "dohd 0.8" "System Manager's Manual"
+.SH NAME
+\fBdohd\fR \- minimalist DNS-over-HTTPS daemon
+.SH SYNOPSIS
+.B dohd
+\-c
+.I cert
+\-k
+.I key
+[
+.B \-p
+.I port
+] [
+.B \-d
+.I dnsserver
+] [
+.B \-u
+.I user
+] [
+.B \-F
+] [
+.B \-v
+] [
+.B \-V
+] [
+.B \-h
+]
+.SH DESCRIPTION
+.B dohd
+listens for incoming DoH requests over TLS and forwards DNS payloads to one or more classic DNS resolvers over UDP.
+.SH OPTIONS
+.TP
+.BI \-c " cert"
+TLS certificate chain file (PEM). Mandatory.
+.TP
+.BI \-k " key"
+TLS private key file (PEM). Mandatory.
+.TP
+.BI \-p " port"
+Listen port for DoH service. Default: 8053.
+.TP
+.BI \-d " dnsserver"
+Upstream DNS resolver IP address. Can be repeated to add multiple resolvers.
+.TP
+.BI \-u " user"
+Drop privileges to this user after binding sockets (when started as root).
+.TP
+.B \-F
+Run in foreground (do not daemonize).
+.TP
+.B \-v
+Verbose logging.
+.TP
+.B \-V
+Print version and exit.
+.TP
+.B \-h
+Print help and exit.
+.SH EXAMPLES
+Run in foreground on port 8053 and forward to 8.8.8.8:
+.PP
+.nf
+ dohd -c /etc/test.crt -k /etc/test.key -p 8053 -d 8.8.8.8 -F
+.fi
+.SH FILES
+.TP
+.I /etc/test.crt
+Example TLS certificate.
+.TP
+.I /etc/test.key
+Example TLS private key.
+.SH SEE ALSO
+.BR ns2dohd (8)
+.SH LICENSE
+GNU AGPLv3.

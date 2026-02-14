@@ -14,6 +14,8 @@
   <span> • </span>
   <a href="#-configuration">🔧 Configuration</a>
   <span> • </span>
+  <a href="#-ns2dohd">🌐 ns2dohd</a>
+  <span> • </span>
   <a href="#-acknowledgements">😍 Acknowledgements</a>
   <span> • </span>
   <a href="#-license">💼 License</a>
@@ -40,7 +42,14 @@ option: `--enable-tls13` or simply `--enable-all`).
 
 2. Type `make`.
 
-3. Executable will be found in `./src/dohd`
+3. Executable will be found in `./src/dohd`.
+   `ns2dohd` executable will be found in `./ns2dohd/ns2dohd`.
+
+4. Optional install step for binaries and manpages:
+
+```
+sudo make install
+```
 
 ***
 # 🎮 Quick start
@@ -102,6 +111,16 @@ Usage: dohd -c cert -k key [-p port] [-d dnsserver] [-F] [-u user] [-V] [-v] [-h
 - '-F' - runs dohd in foreground (instead of creating a daemon)
 
 ***
+# 🌐 ns2dohd
+
+`ns2dohd` is a companion daemon that accepts plain DNS requests on localhost and forwards them to a DoH endpoint.
+
+- Project README: [`ns2dohd/README.md`](ns2dohd/README.md)
+- Manpage: `man ns2dohd`
+- To route system DNS through `ns2dohd`, set `nameserver 127.0.0.1` in `/etc/resolv.conf` or set `127.0.0.1` as primary DNS in NetworkManager.
+- Run `ns2dohd` as root in daemon mode and drop privileges with `-u`.
+
+***
 # 😍 Acknowledgements
 
       Authors: Daniele Lacamera <root@danielinux.net>
@@ -132,4 +151,3 @@ You should have received a copy of the GNU Affero General Public
 License along with dohd.  If not, see <http://www.gnu.org/licenses/>.
 Dohd is licensed under the terms of GNU Affero General Public License
 (GNU AGPL).  See COPYING for details.
-

@@ -1,18 +1,26 @@
 export VERSION := 0.8
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/sbin
+MANDIR ?= $(PREFIX)/share/man
+
 build:
 	make -C src
+	make -C ns2dohd
 
 debug:
 	make -C src debug
+	make -C ns2dohd debug
 
 dmalloc:
 	make -C src dmalloc
 
 asan:
 	make -C src asan
+	make -C ns2dohd asan
 
 clean:
 	make -C src clean
+	make -C ns2dohd clean
 	make -C test clean
 
 docker-build:
@@ -72,5 +80,20 @@ check-flame:
 site:
 	npx docsify-cli serve ./docs
 
+install: build
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 0755 src/dohd $(DESTDIR)$(BINDIR)/dohd
+	install -m 0755 ns2dohd/ns2dohd $(DESTDIR)$(BINDIR)/ns2dohd
+	install -d $(DESTDIR)$(MANDIR)/man8
+	install -m 0644 man/dohd.8 $(DESTDIR)$(MANDIR)/man8/dohd.8
+	install -m 0644 man/ns2dohd.8 $(DESTDIR)$(MANDIR)/man8/ns2dohd.8
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/dohd
+	rm -f $(DESTDIR)$(BINDIR)/ns2dohd
+	rm -f $(DESTDIR)$(MANDIR)/man8/dohd.8
+	rm -f $(DESTDIR)$(MANDIR)/man8/ns2dohd.8
+
 .PHONY: build debug dmalloc asan clean docker-build docker-build-alpine docker-run \
-        check check-asan check-integration check-valgrind check-flame site
+        check check-asan check-integration check-valgrind check-flame site \
+        install uninstall
