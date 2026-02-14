@@ -15,7 +15,7 @@
  *      License along with dohd.  If not, see <http://www.gnu.org/licenses/>.
  *
  *      Authors: Daniele Lacamera <root@danielinux.net>
- *               Denis "Jaromil" Roio <jaromil@dyne.org> 
+ *               Denis "Jaromil" Roio <jaromil@dyne.org>
  *
  */
 
@@ -271,11 +271,61 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
         void *arg);
 static void dohd_destroy_request(struct req_slot *req);
 
-struct client_data *Clients = NULL;
-
 /* Memory pools for client_data and req_slot */
 static mempool_t *client_pool = NULL;
 static mempool_t *request_pool = NULL;
+
+/* Client hash table for O(1) lookup by fd */
+#define CLIENT_HASH_BITS  10
+#define CLIENT_HASH_SIZE  (1 << CLIENT_HASH_BITS)  /* 1024 buckets */
+#define CLIENT_HASH_MASK  (CLIENT_HASH_SIZE - 1)
+
+static struct client_data *client_hash_table[CLIENT_HASH_SIZE];
+
+static inline uint32_t client_hash(int fd)
+{
+    return (uint32_t)fd & CLIENT_HASH_MASK;
+}
+
+static void client_hash_insert(struct client_data *cd)
+{
+    uint32_t h = client_hash(cd->doh_sd);
+    cd->next = client_hash_table[h];
+    client_hash_table[h] = cd;
+}
+
+static void client_hash_remove(struct client_data *cd)
+{
+    uint32_t h = client_hash(cd->doh_sd);
+    struct client_data **pp = &client_hash_table[h];
+    while (*pp) {
+        if (*pp == cd) {
+            *pp = cd->next;
+            cd->next = NULL;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+static struct client_data *client_hash_lookup(int fd)
+{
+    uint32_t h = client_hash(fd);
+    struct client_data *cd = client_hash_table[h];
+    while (cd) {
+        if (cd->doh_sd == fd)
+            return cd;
+        cd = cd->next;
+    }
+    return NULL;
+}
+
+static int client_hash_exists(struct client_data *cd)
+{
+    if (!cd)
+        return 0;
+    return client_hash_lookup(cd->doh_sd) == cd;
+}
 
 static void dohd_listen_error(int __attribute__((unused)) fd,
         short __attribute__((unused)) revents,
@@ -293,28 +343,16 @@ static void sig_stats(int __attribute__((unused)) signo)
 
 static void dohd_destroy_client(struct client_data *cd)
 {
-    struct client_data *l = Clients, *prev = NULL;
     struct req_slot *rp, *nxt;
-    int found = 0;
     if (!cd)
         return;
-    /* Delete from Clients */
-    while (l) {
-        if (cd == l) {
-            if (prev)
-                prev->next = cd->next;
-            else
-                Clients = cd->next;
-            found = 1;
-            break;
-        }
-        prev = l;
-        l = l->next;
-    }
-    if (!found) {
-        dohprint(DOH_ERR, "Unexpected client_data ptr %p not in Clients list\n", cd);
+
+    /* Remove from hash table - O(1) */
+    if (!client_hash_exists(cd)) {
+        dohprint(DOH_ERR, "Unexpected client_data ptr %p not in hash table\n", cd);
         return;
     }
+    client_hash_remove(cd);
 
     /* Cleanup pending requests */
     rp = cd->list;
@@ -366,11 +404,34 @@ static void dohd_destroy_client(struct client_data *cd)
 
 static void clean_exit(int __attribute__((unused)) signo)
 {
-    struct client_data *cl = Clients;
-    while(cl) {
-        Clients = cl->next;
-        dohd_destroy_client(cl);
-        cl = Clients;
+    /* Iterate hash table and destroy all clients */
+    for (int i = 0; i < CLIENT_HASH_SIZE; i++) {
+        while (client_hash_table[i]) {
+            struct client_data *cd = client_hash_table[i];
+            client_hash_table[i] = cd->next;
+            cd->next = NULL;
+            /* Inline cleanup to avoid hash lookup in destroy */
+            struct req_slot *rp = cd->list;
+            while (rp) {
+                struct req_slot *nxt = rp->next;
+                if (rp->ev_dns)
+                    evquick_delevent(rp->ev_dns);
+                if (rp->dns_sd > 0)
+                    close(rp->dns_sd);
+                if (rp->h2_response_data)
+                    free(rp->h2_response_data);
+                mempool_free(request_pool, rp);
+                rp = nxt;
+            }
+            if (cd->ev_doh)
+                evquick_delevent(cd->ev_doh);
+            if (cd->ssl)
+                wolfSSL_free(cd->ssl);
+            close(cd->doh_sd);
+            if (cd->h2_session)
+                nghttp2_session_del(cd->h2_session);
+            mempool_free(client_pool, cd);
+        }
     }
     /* Destroy memory pools */
     mempool_destroy(client_pool);
@@ -684,7 +745,7 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     const size_t bufsz = DOHD_MAX_REPLY;
     uint8_t buff[DOHD_MAX_REPLY];
     int len;
-    struct client_data *cd, *l;
+    struct client_data *cd;
     int age = 0;
     struct req_slot *req;
     nghttp2_data_provider data_prd;
@@ -696,19 +757,10 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
         goto destroy;
     }
 
-    /* Safety check: client data object must still be in the list,
+    /* Safety check: client data object must still be in hash table,
      * or it may have been previously freed and thus is invalid.
      */
-    if (!cd)
-        goto destroy;
-
-    l = Clients;
-    while (l) {
-        if (l == cd)
-            break;
-        l = l->next;
-    }
-    if (!l)
+    if (!client_hash_exists(cd))
         goto destroy;
 
     /* Fix records age and send answers to DoH client */
@@ -921,15 +973,11 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
 {
     uint8_t buff[DNS_BUFFER_MAXSIZE];
     int ret;
-    struct client_data *cd = arg, *l = Clients;
+    struct client_data *cd = arg;
     if (!cd || !cd->ssl)
         return;
-    while (l) {
-        if (l == cd)
-            break;
-        l = l->next;
-    }
-    if (!l)
+    /* Verify client still exists in hash table */
+    if (!client_hash_exists(cd))
         return;
     if (!cd->tls_handshake_done) {
         /* Establish TLS connection */
@@ -1072,8 +1120,9 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
 
     cd->doh_sd = connd;
     cd->ev_doh = evquick_addevent(cd->doh_sd, EVQUICK_EV_READ, tls_read, tls_fail, cd);
-    cd->next = Clients;
-    Clients = cd;
+
+    /* Insert into hash table - O(1) */
+    client_hash_insert(cd);
 
     DOH_Stats.mem += sizeof(struct client_data);
     DOH_Stats.clients++;
@@ -1326,7 +1375,7 @@ int main(int argc, char *argv[])
         dohprint(DOH_ERR, "ERROR: failed to create memory pools\n");
         return -1;
     }
-    dohprint(DOH_DEBUG, "Memory pools initialized: %d clients, %d requests", 
+    dohprint(DOH_DEBUG, "Memory pools initialized: %d clients, %d requests",
              MAX_CLIENTS, MAX_REQUESTS);
 
     /* Create and initialize WOLFSSL_CTX */
