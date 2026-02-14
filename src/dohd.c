@@ -34,6 +34,7 @@
 #include <time.h>
 #include "libevquick.h"
 #include "url64.h"
+#include "mempool.h"
 #include <nghttp2/nghttp2.h>
 #include <netinet/tcp.h>
 
@@ -48,6 +49,10 @@
 
 #define HTTP2_MODE 1 /* Change to '1' once implemented */
 #define OCSP_RESPONDER 1
+
+/* Memory pool sizes */
+#define MAX_CLIENTS 1024
+#define MAX_REQUESTS 4096
 
 #define IP6_LOCALHOST { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }
 #define DOHD_REQ_MIN 20
@@ -268,6 +273,10 @@ static void dohd_destroy_request(struct req_slot *req);
 
 struct client_data *Clients = NULL;
 
+/* Memory pools for client_data and req_slot */
+static mempool_t *client_pool = NULL;
+static mempool_t *request_pool = NULL;
+
 static void dohd_listen_error(int __attribute__((unused)) fd,
         short __attribute__((unused)) revents,
         void __attribute__((unused)) *arg)
@@ -347,7 +356,7 @@ static void dohd_destroy_client(struct client_data *cd)
         nghttp2_session_del(cd->h2_session);
 
     /* free up client data */
-    free(cd);
+    mempool_free(client_pool, cd);
 
     /* Update statistics */
     DOH_Stats.mem -= sizeof(struct client_data);
@@ -363,6 +372,12 @@ static void clean_exit(int __attribute__((unused)) signo)
         dohd_destroy_client(cl);
         cl = Clients;
     }
+    /* Destroy memory pools */
+    mempool_destroy(client_pool);
+    mempool_destroy(request_pool);
+    client_pool = NULL;
+    request_pool = NULL;
+
     fprintf(stderr, "Cleanup, exiting...\n");
 #ifdef DMALLOC
     dmalloc_shutdown();
@@ -388,12 +403,11 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
         dohprint(DOH_WARN, "W: request is not null for this stream id\n");
 
     }
-    req = malloc(sizeof(struct req_slot));
+    req = mempool_alloc(request_pool);
     if (req == NULL) {
         dohprint(DOH_ERR, "Failed to allocate memory for a new DNS request.");
         return req;
     }
-    memset(req, 0, sizeof(struct req_slot));
     req->resolver = next_resolver();
     req->resolver_sz = sizeof(struct sockaddr_in);
     /* Change AF / socksize if IPV6 */
@@ -405,7 +419,7 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
             SOCK_DGRAM, 0);
     if (req->dns_sd < 0) {
         dohprint(DOH_ERR, "Failed to create traditional DNS socket to forward the request.");
-        free(req);
+        mempool_free(request_pool, req);
         return NULL;
     }
     /* append to list */
@@ -618,7 +632,7 @@ static void dohd_destroy_request(struct req_slot *req)
         nghttp2_session_set_stream_user_data(req->owner->h2_session,
                 req->h2_stream_id, NULL);
     }
-    free(req);
+    mempool_free(request_pool, req);
     /* Update statistics */
     DOH_Stats.mem -= sizeof(struct req_slot);
     if (DOH_Stats.pending_requests > 0)
@@ -1012,18 +1026,17 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     int ret;
 #endif
 
-    cd = malloc(sizeof(struct client_data));
+    cd = mempool_alloc(client_pool);
     if (cd == NULL) {
         dohprint(DOH_ERR, "Failed to allocate memory for a new connection\n\n");
         return;
     }
 
-    memset(cd, 0, sizeof(struct client_data));
     /* Accept client connections */
     connd = accept(lfd, NULL, &zero);
     if (connd < 0) {
         dohprint(DOH_WARN, "Failed to accept the connection: %s\n\n", strerror(errno));
-        free(cd);
+        mempool_free(client_pool, cd);
         return;
     }
 #ifdef OCSP_RESPONDER
@@ -1045,7 +1058,7 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     if (cd->ssl == NULL) {
         dohprint(DOH_ERR, "ERROR: failed to create WOLFSSL object\n");
         close(connd);
-        free(cd);
+        mempool_free(client_pool, cd);
         return;
     }
     /* Enable HTTP2 via ALPN */
@@ -1305,6 +1318,16 @@ int main(int argc, char *argv[])
 
     /* Initialize libevquick */
     evquick_init();
+
+    /* Initialize memory pools */
+    client_pool = mempool_create(sizeof(struct client_data), MAX_CLIENTS);
+    request_pool = mempool_create(sizeof(struct req_slot), MAX_REQUESTS);
+    if (!client_pool || !request_pool) {
+        dohprint(DOH_ERR, "ERROR: failed to create memory pools\n");
+        return -1;
+    }
+    dohprint(DOH_DEBUG, "Memory pools initialized: %d clients, %d requests", 
+             MAX_CLIENTS, MAX_REQUESTS);
 
     /* Create and initialize WOLFSSL_CTX */
     if ((wctx = wolfSSL_CTX_new(wolfTLSv1_2_server_method())) == NULL) {
