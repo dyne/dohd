@@ -18,7 +18,7 @@ DOHD_BIN="$ROOT_DIR/src/dohd"
 CERT="${1:-$SCRIPT_DIR/test.crt}"
 KEY="${2:-$SCRIPT_DIR/test.key}"
 PORT="${DOH_PORT:-18054}"
-DNS_SERVER="${DNS_SERVER:-8.8.8.8}"
+DNS_SERVER="${DNS_SERVER:-1.1.1.1}"
 
 echo "=== ASAN Test Runner ==="
 echo ""
@@ -62,7 +62,7 @@ echo "dohd running (PID: $DOHD_PID)"
 
 # Wait for ready
 for i in {1..10}; do
-    if curl -s -k --http2 "https://localhost:$PORT/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE" >/dev/null 2>&1; then
+    if curl -s -k --http2 "https://localhost:$PORT/?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE" >/dev/null 2>&1; then
         break
     fi
     sleep 1
@@ -80,7 +80,7 @@ for i in {1..50}; do
     if curl -s -k --http2 \
         --connect-timeout 5 \
         --max-time 10 \
-        "https://localhost:$PORT/dns-query?dns=$DNS_QUERY" \
+        "https://localhost:$PORT/?dns=$DNS_QUERY" \
         -o /dev/null 2>/dev/null; then
         ((success++))
     else

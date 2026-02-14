@@ -23,7 +23,7 @@ echo "Duration: ${DURATION}s"
 echo ""
 
 # Check connectivity
-if ! curl -s -k --http2 "https://$HOST:$PORT/dns-query?dns=$DNS_QUERY" >/dev/null 2>&1; then
+if ! curl -s -k --http2 "https://$HOST:$PORT/?dns=$DNS_QUERY" >/dev/null 2>&1; then
     echo "ERROR: Cannot connect to dohd at $HOST:$PORT"
     exit 1
 fi
@@ -44,7 +44,7 @@ worker() {
         if curl -s -k --http2 \
             --connect-timeout 5 \
             --max-time 10 \
-            "https://$HOST:$PORT/dns-query?dns=$DNS_QUERY" \
+            "https://$HOST:$PORT/?dns=$DNS_QUERY" \
             -o /dev/null 2>/dev/null; then
             ((success++))
         else

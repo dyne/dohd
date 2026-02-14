@@ -72,6 +72,37 @@ integration: gen-certs
 	bash ./test_request_leaks.sh
 	bash ./test_concurrent.sh
 
+# Stress tests (launch dohd automatically)
+stress: gen-certs
+	@echo "=== Running Multi-threaded Stress Test ==="
+	bash ./stress_test.sh --threads 20 --duration 60
+
+stress-escalate: gen-certs
+	@echo "=== Running Escalating Stress Test ==="
+	bash ./stress_escalate.sh --start 5 --step 5 --max 100 --round-time 20
+
+stress-flood: gen-certs
+	@echo "=== Running Connection Flood Test ==="
+	bash ./stress_flood.sh --rate 100 --duration 60
+
+stress-chaos: gen-certs
+	@echo "=== Running Chaos Test ==="
+	bash ./stress_chaos.sh --workers 30 --duration 60
+
+stress-all: gen-certs
+	@echo "=== Running ALL Stress Tests ==="
+	bash ./stress_test.sh --threads 20 --duration 60 || exit 1
+	bash ./stress_escalate.sh --start 5 --step 10 --max 50 --round-time 15 || exit 1
+	bash ./stress_flood.sh --rate 50 --duration 30 || exit 1
+	bash ./stress_chaos.sh --workers 20 --duration 60 || exit 1
+	@echo ""
+	@echo "=== ALL STRESS TESTS PASSED ==="
+
+# Stress tests with ASAN
+stress-asan: gen-certs
+	@echo "=== Running Stress Test with ASAN ==="
+	bash ./stress_test.sh --threads 10 --duration 60 --asan
+
 # Valgrind leak detection
 valgrind: gen-certs
 	bash ./valgrind_test.sh
