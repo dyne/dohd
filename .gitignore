@@ -52,6 +52,7 @@ test/dohd_url64_test
 test/dohd_url64_extended_test
 test/dohd_heap_test
 test/dohd_dns_parser_test
+test/dohd_mempool_test
 
 # Generated test certificates
 test/*.crt

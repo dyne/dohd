@@ -8,7 +8,7 @@ CFLAGS := -I../src -O0 -ggdb -Wall -Wextra -Wno-sign-compare \
 CFLAGS += $(if $(shell ldd /bin/ls | grep 'musl' | head -1 | cut -d ' ' -f1), -D_MUSL_,)
 
 # Default target: build all unit tests
-all: dohd_url64_test dohd_url64_extended_test dohd_heap_test dohd_dns_parser_test
+all: dohd_url64_test dohd_url64_extended_test dohd_heap_test dohd_dns_parser_test dohd_mempool_test
 
 # Run all unit tests
 check: all
@@ -25,6 +25,9 @@ check: all
 	@echo ""
 	@echo "--- DNS Parser Tests ---"
 	./dohd_dns_parser_test
+	@echo ""
+	@echo "--- Memory Pool Tests ---"
+	./dohd_mempool_test
 	@echo ""
 	@echo "=== All Unit Tests Passed ==="
 
@@ -44,6 +47,10 @@ dohd_heap_test: test_heap.o
 dohd_dns_parser_test: test_dns_parser.o
 	${CC} -o dohd_dns_parser_test test_dns_parser.o
 
+# Memory pool test
+dohd_mempool_test: mempool.o test_mempool.o
+	${CC} -o dohd_mempool_test mempool.o test_mempool.o
+
 # Object files
 url64.o: ../src/url64.c
 	${CC} ${CFLAGS} -c -o url64.o ../src/url64.c
@@ -62,6 +69,12 @@ test_heap.o: test_heap.c ../src/heap.h
 
 test_dns_parser.o: test_dns_parser.c
 	${CC} ${CFLAGS} -c -o test_dns_parser.o test_dns_parser.c
+
+mempool.o: ../src/mempool.c ../src/mempool.h
+	${CC} ${CFLAGS} -c -o mempool.o ../src/mempool.c
+
+test_mempool.o: test_mempool.c ../src/mempool.h
+	${CC} ${CFLAGS} -c -o test_mempool.o test_mempool.c
 
 # Integration tests (require running dohd)
 integration: gen-certs
@@ -113,7 +126,7 @@ gen-certs:
 
 clean:
 	rm -f *.o
-	rm -f dohd_url64_test dohd_url64_extended_test dohd_heap_test dohd_dns_parser_test
+	rm -f dohd_url64_test dohd_url64_extended_test dohd_heap_test dohd_dns_parser_test dohd_mempool_test
 	rm -f test.crt test.key valgrind.log
 
 .PHONY: all check integration valgrind gen-certs clean

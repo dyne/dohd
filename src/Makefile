@@ -22,7 +22,7 @@ asan: CFLAGS+=-fsanitize=address
 asan: LDFLAGS+=-fsanitize=address
 asan: dohd
 
-dohd: url64.o libevquick.o dohd.o
+dohd: url64.o libevquick.o mempool.o dohd.o
 	gcc -o $@ $^ $(LDFLAGS)
 clean:
 	rm -f *.o dohd
