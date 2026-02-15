@@ -40,6 +40,7 @@
 #define DNS_BUFFER_MAXSIZE 4096
 #define DNS_HEADER_MIN 12
 #define TLS_IO_TIMEOUT_SEC 5
+#define DOH_EXCHANGE_TIMEOUT_SEC 20
 #define DEFAULT_CA_BUNDLE "/etc/ssl/certs/ca-certificates.crt"
 #define DEFAULT_BOOTSTRAP_DNS_IP "1.1.1.1"
 #define DEFAULT_BOOTSTRAP_DNS_PORT 53
@@ -344,6 +345,17 @@ static int make_servfail(const uint8_t *in, size_t inlen, uint8_t *out, size_t *
     return 0;
 }
 
+static unsigned long long monotonic_ms(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+
+    return ((unsigned long long)ts.tv_sec * 1000ULL) +
+        ((unsigned long long)ts.tv_nsec / 1000000ULL);
+}
+
 static uint16_t rd_u16(const uint8_t *p)
 {
     return (uint16_t)((p[0] << 8) | p[1]);
@@ -428,8 +440,11 @@ static int resolve_host_bootstrap_type(const char *host, uint16_t qtype,
 
     tv.tv_sec = DNS_TIMEOUT_SEC;
     tv.tv_usec = 0;
-    setsockopt(sd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (setsockopt(sd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+        setsockopt(sd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        close(sd);
+        return -1;
+    }
 
     id = (uint16_t)(((unsigned)getpid() ^ (unsigned)time(NULL)) & 0xFFFF);
     qbuf[0] = (uint8_t)(id >> 8);
@@ -582,8 +597,11 @@ static int tcp_connect_timeout(const struct doh_upstream *up)
     if (fd < 0)
         return -1;
 
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        close(fd);
+        return -1;
+    }
 
     if (connect(fd, (struct sockaddr *)&resolved, resolved_len) != 0) {
         close(fd);
@@ -758,8 +776,10 @@ static int doh_query_roundtrip(WOLFSSL_CTX *wctx,
     uint8_t tlsbuf[DNS_BUFFER_MAXSIZE];
     char clength[32];
     char errbuf[160];
+    unsigned long long deadline_ms;
 
     *reply_len = 0;
+    deadline_ms = monotonic_ms() + (DOH_EXCHANGE_TIMEOUT_SEC * 1000ULL);
 
     fd = tcp_connect_timeout(up);
     if (fd < 0) {
@@ -849,6 +869,13 @@ static int doh_query_roundtrip(WOLFSSL_CTX *wctx,
     }
 
     while (!x.stream_closed && !x.failed) {
+        unsigned long long now_ms = monotonic_ms();
+        if (now_ms > 0 && now_ms >= deadline_ms) {
+            dohprint(DOH_DEBUG, "DoH exchange timed out");
+            x.failed = 1;
+            break;
+        }
+
         ret = nghttp2_session_send(session);
         if (ret != 0) {
             dohprint(DOH_DEBUG, "nghttp2_session_send failed (%s)", nghttp2_strerror(ret));
@@ -1024,14 +1051,24 @@ int main(int argc, char *argv[])
         int pid = fork();
         if (pid < 0)
             return 1;
-        if (pid > 0)
+        if (pid > 0) {
+            free(user);
+            free(resolver_ip);
+            free(cafile);
+            free(url);
             return 0;
+        }
 
         pid = fork();
         if (pid < 0)
             return 1;
-        if (pid > 0)
+        if (pid > 0) {
+            free(user);
+            free(resolver_ip);
+            free(cafile);
+            free(url);
             return 0;
+        }
 
         setsid();
         close(STDIN_FILENO);
