@@ -456,7 +456,10 @@ void evquick_loop(void)
             /* NULL ptr means time_machine pipe for timer wakeups */
             if (e == NULL) {
                 char discard;
-                read(ctx->time_machine[0], &discard, 1);
+                if (read(ctx->time_machine[0], &discard, 1) < 0) {
+                    if (errno != EINTR && errno != EAGAIN)
+                        perror("time_machine read");
+                }
                 timer_check(ctx);
                 continue;
             }
