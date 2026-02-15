@@ -4,32 +4,32 @@ BINDIR ?= $(PREFIX)/sbin
 MANDIR ?= $(PREFIX)/share/man
 
 build:
-	make -C src
-	make -C ns2dohd
-	make -C proxy
-	make -C tools
+	$(MAKE) -C src
+	$(MAKE) -C ns2dohd
+	$(MAKE) -C proxy
+	$(MAKE) -C tools
 
 debug:
-	make -C src debug
-	make -C ns2dohd debug
-	make -C proxy debug
-	make -C tools debug
+	$(MAKE) -C src debug
+	$(MAKE) -C ns2dohd debug
+	$(MAKE) -C proxy debug
+	$(MAKE) -C tools debug
 
 dmalloc:
-	make -C src dmalloc
+	$(MAKE) -C src dmalloc
 
 asan:
-	make -C src asan
-	make -C ns2dohd asan
-	make -C proxy asan
-	make -C tools asan
+	$(MAKE) -C src asan
+	$(MAKE) -C ns2dohd asan
+	$(MAKE) -C proxy asan
+	$(MAKE) -C tools asan
 
 clean:
-	make -C src clean
-	make -C ns2dohd clean
-	make -C proxy clean
-	make -C tools clean
-	make -C test clean
+	$(MAKE) -C src clean
+	$(MAKE) -C ns2dohd clean
+	$(MAKE) -C proxy clean
+	$(MAKE) -C tools clean
+	$(MAKE) -C test clean
 
 docker-build:
 	docker build -f devops/Dockerfile . -t dyne/dohd:${VERSION}
@@ -42,38 +42,38 @@ docker-run:
 
 # Run all unit tests
 check:
-	make -C test check
+	$(MAKE) -C test check
 
 # Run unit tests with ASAN (for leak detection)
 check-asan: asan
-	make -C test check
+	$(MAKE) -C test check
 
 # Run integration tests (requires running dohd instance)
 check-integration:
-	make -C test integration
+	$(MAKE) -C test integration
 
 # Run valgrind leak detection test
 check-valgrind:
-	make -C test valgrind
+	$(MAKE) -C test valgrind
 
 # Stress tests (auto-launch dohd, bombard until failure)
 stress:
-	make -C test stress
+	$(MAKE) -C test stress
 
 stress-escalate:
-	make -C test stress-escalate
+	$(MAKE) -C test stress-escalate
 
 stress-flood:
-	make -C test stress-flood
+	$(MAKE) -C test stress-flood
 
 stress-chaos:
-	make -C test stress-chaos
+	$(MAKE) -C test stress-chaos
 
 stress-all:
-	make -C test stress-all
+	$(MAKE) -C test stress-all
 
 stress-asan:
-	make -C test stress-asan
+	$(MAKE) -C test stress-asan
 
 # requires https://github.com/DNS-OARC/flamethrower
 # default upstream GENERATOR: -g randomlabel lblsize=10 lblcount=4 count=1000

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <wolfssl/version.h>
 #include <wolfssl/wolfcrypt/hmac.h>
 #include <wolfssl/wolfcrypt/hash.h>
 #include <wolfssl/wolfcrypt/aes.h>
@@ -15,6 +16,56 @@
 #define ODOH_LABEL_RESPONSE "odoh response"
 #define ODOH_LABEL_KEY "odoh key"
 #define ODOH_LABEL_NONCE "odoh nonce"
+
+#if defined(LIBWOLFSSL_VERSION_HEX) && (LIBWOLFSSL_VERSION_HEX >= 0x05008000)
+#define ODOH_HAVE_HPKE_CONTEXT_API 1
+#else
+#define ODOH_HAVE_HPKE_CONTEXT_API 0
+#endif
+
+static int odoh_hpke_init_seal_context(Hpke *hpke, HpkeBaseContext *ctx,
+    void *eph, void *receiver, byte *info, word32 info_sz)
+{
+#if ODOH_HAVE_HPKE_CONTEXT_API
+    return wc_HpkeInitSealContext(hpke, ctx, eph, receiver, info, info_sz);
+#else
+    (void)hpke; (void)ctx; (void)eph; (void)receiver; (void)info; (void)info_sz;
+    return -1;
+#endif
+}
+
+static int odoh_hpke_context_seal_base(Hpke *hpke, HpkeBaseContext *ctx,
+    byte *aad, word32 aad_sz, byte *pt, word32 pt_sz, byte *out)
+{
+#if ODOH_HAVE_HPKE_CONTEXT_API
+    return wc_HpkeContextSealBase(hpke, ctx, aad, aad_sz, pt, pt_sz, out);
+#else
+    (void)hpke; (void)ctx; (void)aad; (void)aad_sz; (void)pt; (void)pt_sz; (void)out;
+    return -1;
+#endif
+}
+
+static int odoh_hpke_init_open_context(Hpke *hpke, HpkeBaseContext *ctx,
+    void *receiver, const byte *enc, word16 enc_sz, byte *info, word32 info_sz)
+{
+#if ODOH_HAVE_HPKE_CONTEXT_API
+    return wc_HpkeInitOpenContext(hpke, ctx, receiver, enc, enc_sz, info, info_sz);
+#else
+    (void)hpke; (void)ctx; (void)receiver; (void)enc; (void)enc_sz; (void)info; (void)info_sz;
+    return -1;
+#endif
+}
+
+static int odoh_hpke_context_open_base(Hpke *hpke, HpkeBaseContext *ctx,
+    byte *aad, word32 aad_sz, byte *ct, word32 ct_sz, byte *out)
+{
+#if ODOH_HAVE_HPKE_CONTEXT_API
+    return wc_HpkeContextOpenBase(hpke, ctx, aad, aad_sz, ct, ct_sz, out);
+#else
+    (void)hpke; (void)ctx; (void)aad; (void)aad_sz; (void)ct; (void)ct_sz; (void)out;
+    return -1;
+#endif
+}
 
 static uint16_t be16(const uint8_t *p)
 {
@@ -363,6 +414,10 @@ int odoh_client_encrypt_query(const odoh_config *cfg,
     uint8_t *out, uint16_t *out_len,
     odoh_client_ctx *client_ctx)
 {
+#if !ODOH_HAVE_HPKE_CONTEXT_API
+    (void)cfg; (void)dns_msg; (void)dns_len; (void)out; (void)out_len; (void)client_ctx;
+    return -1;
+#else
     uint8_t plain[ODOH_MAX_MESSAGE];
     uint16_t plain_len;
     uint8_t aad[3 + ODOH_MAX_KEY_ID];
@@ -399,7 +454,7 @@ int odoh_client_encrypt_query(const odoh_config *cfg,
         return -1;
     }
 
-    if (wc_HpkeInitSealContext(&client_ctx->hpke, &client_ctx->hpke_ctx,
+    if (odoh_hpke_init_seal_context(&client_ctx->hpke, &client_ctx->hpke_ctx,
             eph, receiver, (byte *)ODOH_INFO_QUERY, (word32)strlen(ODOH_INFO_QUERY)) != 0) {
         wc_HpkeFreeKey(&client_ctx->hpke, cfg->kem_id, eph, NULL);
         wc_HpkeFreeKey(&client_ctx->hpke, cfg->kem_id, receiver, NULL);
@@ -422,7 +477,7 @@ int odoh_client_encrypt_query(const odoh_config *cfg,
     }
 
     ct_len = plain_len + client_ctx->hpke.Nt;
-    if (wc_HpkeContextSealBase(&client_ctx->hpke, &client_ctx->hpke_ctx,
+    if (odoh_hpke_context_seal_base(&client_ctx->hpke, &client_ctx->hpke_ctx,
             aad, aad_len, plain, plain_len, ct) != 0) {
         wc_HpkeFreeKey(&client_ctx->hpke, cfg->kem_id, eph, NULL);
         wc_HpkeFreeKey(&client_ctx->hpke, cfg->kem_id, receiver, NULL);
@@ -460,6 +515,7 @@ int odoh_client_encrypt_query(const odoh_config *cfg,
     wc_HpkeFreeKey(&client_ctx->hpke, cfg->kem_id, receiver, NULL);
     wc_FreeRng(&rng);
     return 0;
+#endif
 }
 
 int odoh_target_decrypt_query(odoh_target_ctx *target,
@@ -467,6 +523,10 @@ int odoh_target_decrypt_query(odoh_target_ctx *target,
     uint8_t *dns_out, uint16_t *dns_out_len,
     odoh_req_ctx *req_ctx)
 {
+#if !ODOH_HAVE_HPKE_CONTEXT_API
+    (void)target; (void)in; (void)in_len; (void)dns_out; (void)dns_out_len; (void)req_ctx;
+    return -1;
+#else
     odoh_message_view msg;
     uint8_t aad[3 + ODOH_MAX_KEY_ID];
     uint16_t aad_len;
@@ -502,7 +562,7 @@ int odoh_target_decrypt_query(odoh_target_ctx *target,
     ct = msg.encrypted + enc_len;
     ct_len = (uint16_t)(msg.encrypted_len - enc_len);
 
-    if (wc_HpkeInitOpenContext(&req_ctx->hpke, &req_ctx->hpke_ctx,
+    if (odoh_hpke_init_open_context(&req_ctx->hpke, &req_ctx->hpke_ctx,
             &target->priv, enc, enc_len,
             (byte *)ODOH_INFO_QUERY, (word32)strlen(ODOH_INFO_QUERY)) != 0)
         return -1;
@@ -510,7 +570,7 @@ int odoh_target_decrypt_query(odoh_target_ctx *target,
     if (build_query_aad(target->cfg.key_id, target->cfg.key_id_len, aad, &aad_len) != 0)
         return -1;
 
-    if (wc_HpkeContextOpenBase(&req_ctx->hpke, &req_ctx->hpke_ctx,
+    if (odoh_hpke_context_open_base(&req_ctx->hpke, &req_ctx->hpke_ctx,
             aad, aad_len, (byte *)ct, ct_len, plain) != 0)
         return -1;
 
@@ -522,12 +582,17 @@ int odoh_target_decrypt_query(odoh_target_ctx *target,
     req_ctx->valid = 1;
 
     return 0;
+#endif
 }
 
 int odoh_target_encrypt_response(const odoh_req_ctx *req_ctx,
     const uint8_t *dns_msg, uint16_t dns_len,
     uint8_t *out, uint16_t *out_len)
 {
+#if !ODOH_HAVE_HPKE_CONTEXT_API
+    (void)req_ctx; (void)dns_msg; (void)dns_len; (void)out; (void)out_len;
+    return -1;
+#else
     uint8_t plain[ODOH_MAX_MESSAGE];
     uint16_t plain_len;
     uint8_t resp_nonce[64];
@@ -599,12 +664,17 @@ int odoh_target_encrypt_response(const odoh_req_ctx *req_ctx,
 
     *out_len = (uint16_t)off;
     return 0;
+#endif
 }
 
 int odoh_client_decrypt_response(odoh_client_ctx *client_ctx,
     const uint8_t *in, uint16_t in_len,
     uint8_t *dns_out, uint16_t *dns_out_len)
 {
+#if !ODOH_HAVE_HPKE_CONTEXT_API
+    (void)client_ctx; (void)in; (void)in_len; (void)dns_out; (void)dns_out_len;
+    return -1;
+#else
     odoh_message_view msg;
     uint8_t aad[3 + 64];
     uint16_t aad_len;
@@ -656,4 +726,5 @@ int odoh_client_decrypt_response(odoh_client_ctx *client_ctx,
     wc_AesFree(&aes);
 
     return ret == 0 ? 0 : -1;
+#endif
 }
