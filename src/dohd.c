@@ -50,9 +50,24 @@
 #define HTTP2_MODE 1 /* Change to '1' once implemented */
 #define OCSP_RESPONDER 1
 
-/* Memory pool sizes */
+/*
+ * Memory pool sizes:
+ *
+ * MAX_CLIENTS and MAX_REQUESTS define the upper bounds for the internal
+ * connection and request pools. These limits are used to cap memory usage
+ * and reduce dynamic allocations under high load.
+ *
+ * The default values (1024 clients, 4096 requests) are chosen as a
+ * reasonable compromise between memory footprint and concurrency for
+ * typical deployments. If you need to tune these for a specific
+ * environment (e.g. very small embedded systems or large-scale servers),
+ * you can adjust the values at compile time.
+ */
 #define MAX_CLIENTS 1024
 #define MAX_REQUESTS 4096
+
+/* DNS request timeout in milliseconds */
+#define DNS_REQUEST_TIMEOUT_MS 5000
 
 #define IP6_LOCALHOST { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }
 #define DOHD_REQ_MIN 20
@@ -277,9 +292,12 @@ static void dohd_destroy_request(struct req_slot *req);
 static mempool_t *client_pool = NULL;
 static mempool_t *request_pool = NULL;
 
-/* Client hash table for O(1) lookup by fd */
-#define CLIENT_HASH_BITS  10
-#define CLIENT_HASH_SIZE  (1 << CLIENT_HASH_BITS)  /* 1024 buckets */
+/*
+ * Client hash table for O(1) lookup by fd.
+ * Size is 2x MAX_CLIENTS to maintain low load factor and minimize collisions.
+ * Using power-of-2 size enables fast modulo via bitmask.
+ */
+#define CLIENT_HASH_SIZE  (MAX_CLIENTS * 2)  /* 2x capacity for low collisions */
 #define CLIENT_HASH_MASK  (CLIENT_HASH_SIZE - 1)
 
 static struct client_data *client_hash_table[CLIENT_HASH_SIZE];
@@ -475,7 +493,7 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     }
     req = mempool_alloc(request_pool);
     if (req == NULL) {
-        dohprint(DOH_ERR, "Failed to allocate memory for a new DNS request.");
+        dohprint(DOH_ERR, "Request pool exhausted (capacity: %u)", MAX_REQUESTS);
         return req;
     }
     req->resolver = next_resolver();
@@ -488,10 +506,18 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     req->dns_sd = socket(((struct sockaddr_in *)req->resolver)->sin_family,
             SOCK_DGRAM, 0);
     if (req->dns_sd < 0) {
-        dohprint(DOH_ERR, "Failed to create traditional DNS socket to forward the request.");
+        dohprint(DOH_ERR, "Failed to create UDP socket for DNS request");
         mempool_free(request_pool, req);
         return NULL;
     }
+
+    /* Set socket receive timeout to complement timer-based timeout.
+     * This ensures recv() won't block indefinitely if the event loop
+     * callback fires but data isn't immediately available. */
+    struct timeval tv = { .tv_sec = DNS_REQUEST_TIMEOUT_MS / 1000,
+                          .tv_usec = (DNS_REQUEST_TIMEOUT_MS % 1000) * 1000 };
+    setsockopt(req->dns_sd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     /* append to list */
     req->next = cd->list;
     cd->list = req;
@@ -509,29 +535,31 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     return req;
 }
 
-/* DNS request timeout in milliseconds (5 seconds) */
-#define DNS_REQUEST_TIMEOUT_MS 5000
-
 /* Timeout callback - upstream DNS didn't respond in time */
 static void dns_request_timeout(void *arg)
 {
     struct req_slot *req = (struct req_slot *)arg;
     struct client_data *cd;
+    nghttp2_session *session;
 
-    dohprint(DOH_WARN, "DNS request timeout (stream %u)", req->h2_stream_id);
     DOH_Stats.socket_errors++;
 
     /* Use owner_fd to safely look up if client still exists without
-     * dereferencing the potentially-freed owner pointer */
+     * dereferencing the potentially-freed owner pointer.
+     * Note: This is single-threaded, so no race between lookup and use. */
     cd = client_hash_lookup(req->owner_fd);
-    if (cd && cd == req->owner && cd->h2_session) {
-        /* Send HTTP 504 Gateway Timeout to client */
-        nghttp2_nv nva[] = {
-            MAKE_NV(":status", "504"),
-            MAKE_NV("server", "dohd"),
-        };
-        nghttp2_submit_response(cd->h2_session, req->h2_stream_id, nva, 2, NULL);
-        nghttp2_session_send(cd->h2_session);
+    if (cd && cd == req->owner) {
+        /* Capture session pointer after validation */
+        session = cd->h2_session;
+        if (session) {
+            /* Send HTTP 504 Gateway Timeout to client */
+            nghttp2_nv nva[] = {
+                MAKE_NV(":status", "504"),
+                MAKE_NV("server", "dohd"),
+            };
+            nghttp2_submit_response(session, req->h2_stream_id, nva, 2, NULL);
+            nghttp2_session_send(session);
+        }
     }
 
     /* Timer already fired, clear it before destroy */
@@ -553,7 +581,6 @@ static int dns_send_request_h2(struct req_slot *req)
     ret = sendto(req->dns_sd, req->h2_request_buffer, req->h2_request_len, 0,
             (struct sockaddr *)req->resolver, req->resolver_sz);
     if (ret < 0) {
-        dohprint(DOH_ERR, "Resolver send failed: %s\n", strerror(errno));
         DOH_Stats.socket_errors++;
         check_stats();
         dohd_destroy_request(req);
@@ -572,17 +599,6 @@ static int dns_send_request_h2(struct req_slot *req)
 
 static ssize_t client_ssl_write(struct client_data *cd, const void *data, size_t len)
 {
-#ifdef VERBOSE_HTTP_DEBUG
-    int i;
-    uint8_t *reply = (uint8_t *)data;
-    dohprint(DOH_NOTICE,"\n\nSSL Write: %lu bytes\n", len);
-    for (i = 0; i < len; i++) {
-        dohprint(DOH_NOTICE,"%02x ", (reply[i]));
-        if ((i % 16) == 15)
-            dohprint(DOH_NOTICE,"\n");
-    }
-    dohprint(DOH_NOTICE,"\n\n");
-#endif
     return wolfSSL_write(cd->ssl, data, len);
 }
 
@@ -677,7 +693,6 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
     for (i = 0; i < ntohs(hdr->qdcount); i++) {
         skip = dns_skip_question(&record, len);
         if (skip < DNSQ_SUFFIX_LEN) {
-            dohprint(DOH_WARN, "Cannot parse DNS reply!\n");
             return min_ttl;
         }
         len -= skip;
@@ -819,7 +834,6 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
 
     len = recv(fd, buff, bufsz, 0);
     if (len < 16) {
-        dohprint(DOH_ERR, "Error while receiving DNS reply: socket error %d\n", errno);
         goto destroy;
     }
 
@@ -855,7 +869,6 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
         data_prd.read_callback = h2_cb_req_submit;
         if (nghttp2_submit_response(req->owner->h2_session,
                 req->h2_stream_id, nva, 4, &data_prd) < 0) {
-            dohprint(DOH_WARN, "H2: submit response failed\n");
             dohd_destroy_request(req);
             return;
         }
@@ -900,15 +913,12 @@ static int h2_cb_on_data_chunk_recv(nghttp2_session *session, uint8_t flags,
     }
     req = nghttp2_session_get_stream_user_data(session, stream_id);
     if (!req) {
-        dohprint(DOH_WARN, "H2: received bogus DATA not associated to request\n");
         goto data_fail;
     }
     if (req->owner != cd) {
-        dohprint(DOH_WARN, "H2: received DATA chunk with wrong stream_id\n");
         goto data_fail;
     }
     if (len > DNS_BUFFER_MAXSIZE) {
-        dohprint(DOH_WARN, "H2: received DATA chunk too large (%lu)\n", len);
         goto data_fail;
     }
     memcpy(req->h2_request_buffer, data, len);
@@ -1003,6 +1013,14 @@ static int h2_cb_on_header(nghttp2_session *session,
             if (!req) {
                 req = dns_create_request_h2(cd, frame->hd.stream_id);
                 if (!req) {
+                    /* Pool exhausted or socket creation failed - send 503 */
+                    nghttp2_nv nva[] = {
+                        MAKE_NV(":status", "503"),
+                        MAKE_NV("server", "dohd"),
+                        MAKE_NV("retry-after", "1"),
+                    };
+                    nghttp2_submit_response(session, frame->hd.stream_id, nva, 3, NULL);
+                    DOH_Stats.socket_errors++;
                     return 0;
                 }
             }

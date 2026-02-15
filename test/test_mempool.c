@@ -425,15 +425,20 @@ TEST(double_free_safe)
 
     mempool_free(pool, p);
     
-    /* Double free - pointer is now part of freelist, 
-     * but freeing again should be handled gracefully.
-     * The slot is already free, so this is a no-op or
-     * will corrupt the freelist. We just verify no crash. */
+    /* Double free - should be detected and ignored via bitmap */
     mempool_free(pool, p);
 
-    /* Pool should still be usable (though potentially corrupted) */
+    /* Verify double-free was detected */
+    struct mempool_stats stats;
+    mempool_stats(pool, &stats);
+    ASSERT_EQ(stats.double_free, 1);
+    ASSERT_EQ(stats.allocated, 0);
+    ASSERT_EQ(stats.free_count, 1);  /* Only first free counted */
+
+    /* Pool should still be usable and NOT corrupted */
     void *p2 = mempool_alloc(pool);
     ASSERT_NOT_NULL(p2);
+    ASSERT_EQ(p2, p);  /* Same slot reused */
 
     mempool_destroy(pool);
 }
