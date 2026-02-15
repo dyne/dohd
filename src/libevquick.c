@@ -17,7 +17,15 @@
 #include <fcntl.h>
 #include <assert.h>
 
-#define EVQUICK_MAX_EVENTS 256
+/*
+ * Maximum events returned per epoll_wait call.
+ * This bounds the stack-allocated event array and determines batch size.
+ * Higher values reduce syscall overhead under high load but use more stack.
+ * 512 balances efficiency with typical ulimit stack sizes.
+ */
+#ifndef EVQUICK_MAX_EVENTS
+#define EVQUICK_MAX_EVENTS 512
+#endif
 
 
 
@@ -464,7 +472,7 @@ void evquick_loop(void)
 #else
                 e->err_callback(e->fd, ep_events[i].events, e->arg);
 #endif
-            } else {
+            } else if (e->callback) {
                 /* Call normal callback for read/write or if no err_callback */
 #ifdef EVQUICK_PTHREAD
                 e->callback(ctx, e->fd, ep_events[i].events, e->arg);
@@ -474,7 +482,12 @@ void evquick_loop(void)
             }
         }
 
-        /* Free events that were deleted during this batch */
+        /* Free events that were deleted during this batch.
+         * Note: Deferred freeing prevents use-after-free when events are
+         * deleted from within callbacks. If many events are deleted in one
+         * batch, memory is held until this point. This is acceptable for
+         * typical workloads but could cause temporary memory spikes under
+         * extreme conditions. */
         while (ctx->pending_free) {
             evquick_event *e = ctx->pending_free;
             ctx->pending_free = e->next;

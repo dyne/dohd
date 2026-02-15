@@ -19,6 +19,7 @@ struct mempool_stats {
     uint32_t alloc_count;   /* Total allocations */
     uint32_t free_count;    /* Total frees */
     uint32_t exhausted;     /* Times pool was full */
+    uint32_t double_free;   /* Double-free attempts detected */
 };
 
 /* Opaque pool handle */
