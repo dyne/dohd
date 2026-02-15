@@ -1,0 +1,106 @@
+.TH DOHPROXYD 8 "February 2026" "dohd 0.8" "System Manager's Manual"
+.SH NAME
+\fBdohproxyd\fR \- DoH/ODoH proxy daemon
+.SH SYNOPSIS
+.B dohproxyd
+\-c
+.I cert
+\-k
+.I key
+[
+.B \-p
+.I port
+] [
+.B \-u
+.I user
+] [
+.B \-A
+.I cafile
+] [
+.B \-\-target-url
+.I https://host/path
+] [
+.B \-\-targets-file
+.I file
+] [
+.B \-\-target-cert
+.I cert
+] [
+.B \-\-target-key
+.I key
+] [
+.B \-F
+] [
+.B \-v
+] [
+.B \-V
+] [
+.B \-h
+]
+.SH DESCRIPTION
+.B dohproxyd
+is a standalone DoH/ODoH proxy.
+It accepts
+.B application/oblivious-dns-message
+requests and forwards encrypted payloads to a target resolver specified in request query parameters.
+It also accepts legacy RFC8484
+.B application/dns-message
+requests and forwards them to configured targets.
+.SH OPTIONS
+.TP
+.BI \-c " cert"
+TLS server certificate chain (PEM).
+.TP
+.BI \-k " key"
+TLS server private key (PEM).
+.TP
+.BI \-p " port"
+Listen port (default: 8443).
+.TP
+.BI \-u " user"
+Drop privileges to user after binding sockets.
+.TP
+.BI \-A " cafile"
+CA bundle used to verify upstream target TLS certificates.
+.TP
+.BI \-\-target-url " https://host/path"
+Add one legacy RFC8484 target URL. Can be repeated.
+.TP
+.BI \-\-targets-file " file"
+Read legacy target URLs from file (one URL per line, '#' comments allowed).
+.TP
+.BI \-\-target-cert " cert"
+Optional client certificate (PEM) presented to ODoH target resolver.
+.TP
+.BI \-\-target-key " key"
+Optional client private key (PEM) for
+.BR \-\-target-cert .
+.IP
+Legacy RFC8484 target selection uses RFC-style random rotation.
+.TP
+.B \-F
+Run in foreground.
+.TP
+.B \-v
+Verbose logging.
+.TP
+.B \-V
+Print version and exit.
+.TP
+.B \-h
+Print help and exit.
+.SH SECURITY CONSIDERATIONS
+RFC 9230 deployment guidance requires operational separation:
+proxy and target should not run on the same host, in the same administrative
+domain, or under the same organization if privacy is a goal.
+.PP
+Otherwise, the same operator can correlate client-side metadata seen by the
+proxy with decrypted DNS contents seen by the target.
+.PP
+Running both on one host is only for protocol testing and debugging.
+.SH SEE ALSO
+.BR dohd (8),
+.BR ns2dohd (8),
+.BR odoh-keygen (1)
+.SH LICENSE
+GNU AGPLv3.

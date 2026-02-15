@@ -1,0 +1,4 @@
+# Example legacy RFC8484 target list for dohproxyd --targets-file
+# One https URL per line.
+https://target-a.example.net/dns-query
+https://target-b.example.net/dns-query
