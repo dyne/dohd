@@ -51,6 +51,16 @@ option: `--enable-tls13` or simply `--enable-all`).
 sudo make install
 ```
 
+Installed helper tool:
+
+- `odoh-keygen` (manpage: `man odoh-keygen`) generates ODoH X25519 key material in the exact formats required by `dohd`/`ns2dohd`.
+
+Example:
+
+```bash
+odoh-keygen -s /etc/dohd/odoh-target.secret -p /etc/dohd/odoh-target.public -c /etc/dohd/odoh-target.config
+```
+
 ***
 # 🎮 Quick start
 
@@ -119,6 +129,36 @@ Usage: dohd -c cert -k key [-p port] [-d dnsserver] [-F] [-u user] [-V] [-v] [-h
 - Manpage: `man ns2dohd`
 - To route system DNS through `ns2dohd`, set `nameserver 127.0.0.1` in `/etc/resolv.conf` or set `127.0.0.1` as primary DNS in NetworkManager.
 - Run `ns2dohd` as root in daemon mode and drop privileges with `-u`.
+- ODoH mode: run `ns2dohd -O --odoh-proxy https://proxy.example/dns-query --odoh-config /path/to/odoh.config ...`
+
+## dohproxyd
+
+`dohproxyd` is a standalone DoH/ODoH proxy daemon.
+
+- Binary: `proxy/dohproxyd`
+- Manpage: `man dohproxyd`
+- Installed by `make install` together with `dohd` and `ns2dohd`
+- Use `--target-cert` and `--target-key` when forwarding to a `dohd -O` target that enforces authorized proxy certificates.
+- For legacy RFC8484 forwarding, provide targets with repeated `--target-url` or `--targets-file`; target selection uses RFC-style random rotation.
+
+## ODoH Deployment Warning (RFC 9230)
+
+For ODoH privacy properties to hold, **do not deploy proxy and target on the same host or under the same organization**.
+The proxy and target are expected to be independently operated and separately observable entities.
+If one operator controls or can observe both sides, it can correlate client identity/metadata at the proxy with decrypted DNS content at the target, defeating obliviousness.
+
+Running both locally is acceptable only for protocol evaluation, development, and interoperability testing.
+
+## ODoH Helper Scripts
+
+Example scripts are provided in `examples/odoh/`:
+
+- `examples/odoh/deploy-target-example.sh`
+- `examples/odoh/deploy-proxy-example.sh`
+- `examples/odoh/selftest-proxy-target-curl.sh`
+- `examples/odoh/dodh_targets` (sample input for `dohproxyd --targets-file`)
+
+The self-test script intentionally runs proxy+target on one host and uses `curl` for transport checks. It is not a production deployment model.
 
 ***
 # 😍 Acknowledgements

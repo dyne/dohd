@@ -17,6 +17,17 @@
 .B \-u
 .I user
 ] [
+.B \-O
+] [
+.B \-\-odoh-config
+.I file
+] [
+.B \-\-odoh-secret
+.I file
+] [
+.B \-\-authorized-proxies-dir
+.I dir
+] [
 .B \-F
 ] [
 .B \-v
@@ -28,6 +39,12 @@
 .SH DESCRIPTION
 .B dohd
 listens for incoming DoH requests over TLS and forwards DNS payloads to one or more classic DNS resolvers over UDP.
+.PP
+With
+.B \-O
+enabled, it acts as an ODoH target resolver and accepts
+.B application/oblivious-dns-message
+from authorized proxies.
 .SH OPTIONS
 .TP
 .BI \-c " cert"
@@ -44,6 +61,26 @@ Upstream DNS resolver IP address. Can be repeated to add multiple resolvers.
 .TP
 .BI \-u " user"
 Drop privileges to this user after binding sockets (when started as root).
+.TP
+.B \-O
+Enable ODoH target mode (ODoH media type only).
+.TP
+.BI \-\-odoh-config " file"
+Binary ObliviousDoHConfigs file for target public key configuration.
+.TP
+.BI \-\-odoh-secret " file"
+Private key file for ODoH target (32-byte raw X25519 key).
+.IP
+Use
+.BR odoh-keygen (1)
+to create matching
+.B \-\-odoh-secret
+and
+.B \-\-odoh-config
+files.
+.TP
+.BI \-\-authorized-proxies-dir " dir"
+Directory containing authorized proxy public keys (PEM), one key per file.
 .TP
 .B \-F
 Run in foreground (do not daemonize).
@@ -69,7 +106,19 @@ Example TLS certificate.
 .TP
 .I /etc/test.key
 Example TLS private key.
+.SH SECURITY CONSIDERATIONS
+For ODoH privacy properties, do not operate target and proxy on the same host,
+network boundary, or organization. RFC 9230 relies on trust separation between
+proxy and target operators.
+.PP
+A single operator that can observe both sides can correlate proxy-side client
+metadata with target-side decrypted DNS messages.
+.PP
+Co-located proxy+target setups are suitable only for protocol evaluation and
+interoperability tests.
 .SH SEE ALSO
-.BR ns2dohd (8)
+.BR dohproxyd (8),
+.BR ns2dohd (8),
+.BR odoh-keygen (1)
 .SH LICENSE
 GNU AGPLv3.

@@ -15,6 +15,14 @@
 .B \-r
 .I resolver_ip
 ] [
+.B \-O
+] [
+.B \-\-odoh-proxy
+.I proxy_url
+] [
+.B \-\-odoh-config
+.I config_file
+] [
 .B \-A
 .I cafile
 ] [
@@ -50,6 +58,23 @@ Bootstrap DNS resolver IP used for resolving the DoH endpoint host. Default: 1.1
 .BI \-A " cafile"
 CA bundle file in PEM format.
 .TP
+.B \-O
+Enable ODoH client mode.
+.TP
+.BI \-\-odoh-proxy " proxy_url"
+ODoH proxy URL used in ODoH mode.
+.TP
+.BI \-\-odoh-config " config_file"
+Binary ObliviousDoHConfigs file for target public key config.
+.IP
+In ODoH mode, the target resolver from
+.B \-d
+is automatically encoded as
+.B targethost
+and
+.B targetpath
+query parameters for the proxy.
+.TP
 .B \-F
 Run in foreground (do not daemonize).
 .TP
@@ -61,6 +86,13 @@ Print version and exit.
 .TP
 .B \-h
 Print help and exit.
+.SH ODOH DEPLOYMENT NOTE
+When using ODoH mode, production privacy requires independent proxy and target
+operators as described by RFC 9230. Local or same-organization proxy+target
+deployments are for protocol evaluation only.
+.PP
+Without separation, proxy-observed client metadata can be correlated with
+target-decrypted DNS contents.
 .SH EXAMPLES
 Run as local DNS daemon and drop privileges to user \fB_dohd\fR:
 .PP
@@ -74,6 +106,8 @@ Use a custom bootstrap resolver:
  ns2dohd -d https://dns.dyne.org/dns-query -r 9.9.9.9 -u _dohd
 .fi
 .SH SEE ALSO
-.BR dohd (8)
+.BR dohd (8),
+.BR dohproxyd (8),
+.BR odoh-keygen (1)
 .SH LICENSE
 GNU AGPLv3.

@@ -35,6 +35,8 @@
 #include "libevquick.h"
 #include "url64.h"
 #include "mempool.h"
+#include "odoh.h"
+#include "proxy_auth.h"
 #include <nghttp2/nghttp2.h>
 #include <netinet/tcp.h>
 
@@ -252,6 +254,13 @@ struct __attribute__((packed)) dns_header
 
 static int lfd = -1;
 static WOLFSSL_CTX *wctx = NULL;
+static int oblivion_mode = 0;
+static char *odoh_secret_file = NULL;
+static char *odoh_config_file = NULL;
+static char *authorized_proxy_dir = NULL;
+static char *resolved_proxy_dir = NULL;
+static odoh_target_ctx odoh_target = {};
+static proxy_auth_set proxy_set = {};
 #ifndef _MUSL_
 void *sigset(int sig, void (*disp)(int));
 #endif
@@ -267,6 +276,9 @@ struct req_slot {
     uint32_t h2_request_len;
     uint8_t *h2_response_data;
     uint32_t h2_response_len;
+    int is_odoh;
+    int content_type_seen;
+    odoh_req_ctx odoh_ctx;
     uint16_t id;
     struct sockaddr *resolver;
     socklen_t resolver_sz;
@@ -355,8 +367,76 @@ static void dohd_listen_error(int __attribute__((unused)) fd,
     exit(80);
 }
 
+static int verify_always_ok(int preverify, WOLFSSL_X509_STORE_CTX *store)
+{
+    (void)preverify;
+    (void)store;
+    return 1;
+}
+
+static char *resolve_proxy_dir_path(const char *path, const char *target_user)
+{
+    const char *home = NULL;
+    struct passwd *pw = NULL;
+    char *out;
+    size_t out_len;
+
+    if (!path)
+        return NULL;
+
+    if (path[0] != '~')
+        return strdup(path);
+
+    if (target_user && target_user[0] != '\0') {
+        pw = getpwnam(target_user);
+        if (!pw || !pw->pw_dir)
+            return NULL;
+        home = pw->pw_dir;
+    } else {
+        pw = getpwuid(getuid());
+        if (!pw || !pw->pw_dir)
+            return NULL;
+        home = pw->pw_dir;
+    }
+
+    out_len = strlen(home) + strlen(path);
+    out = malloc(out_len + 1);
+    if (!out)
+        return NULL;
+    snprintf(out, out_len + 1, "%s%s", home, path + 1);
+    return out;
+}
+
+static int reload_proxy_authorization(void)
+{
+    proxy_auth_set newset = {};
+    if (!resolved_proxy_dir)
+        return -1;
+    if (proxy_auth_load_dir(resolved_proxy_dir, &newset) != 0)
+        return -1;
+    proxy_auth_free(&proxy_set);
+    proxy_set = newset;
+    return 0;
+}
+
+static int reload_odoh_target(void)
+{
+    odoh_target_ctx next = {};
+    if (!odoh_config_file || !odoh_secret_file)
+        return -1;
+    if (odoh_target_load_files(odoh_config_file, odoh_secret_file, &next) != 0)
+        return -1;
+    odoh_target_free(&odoh_target);
+    odoh_target = next;
+    return 0;
+}
+
 static void sig_stats(int __attribute__((unused)) signo)
 {
+    if (oblivion_mode) {
+        reload_proxy_authorization();
+        reload_odoh_target();
+    }
     printstats();
 }
 
@@ -465,6 +545,10 @@ static void clean_exit(int __attribute__((unused)) signo)
     mempool_destroy(request_pool);
     client_pool = NULL;
     request_pool = NULL;
+    proxy_auth_free(&proxy_set);
+    odoh_target_free(&odoh_target);
+    free(resolved_proxy_dir);
+    resolved_proxy_dir = NULL;
 
     fprintf(stderr, "Cleanup, exiting...\n");
 #ifdef DMALLOC
@@ -531,6 +615,9 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     req->owner_fd = cd->doh_sd;
     req->h2_stream_id = stream_id;
     req->timeout_timer = NULL;
+    req->is_odoh = 0;
+    req->content_type_seen = 0;
+    memset(&req->odoh_ctx, 0, sizeof(req->odoh_ctx));
     nghttp2_session_set_stream_user_data(cd->h2_session, stream_id, req);
     return req;
 }
@@ -570,7 +657,22 @@ static void dns_request_timeout(void *arg)
 static int dns_send_request_h2(struct req_slot *req)
 {
     int ret;
+    uint8_t plain_dns[DNS_BUFFER_MAXSIZE];
+    uint16_t plain_len = 0;
     struct dns_header *hdr;
+    if (oblivion_mode) {
+        if (!req->is_odoh)
+            return -1;
+        if (odoh_target_decrypt_query(&odoh_target,
+                req->h2_request_buffer, (uint16_t)req->h2_request_len,
+                plain_dns, &plain_len, &req->odoh_ctx) != 0) {
+            return -1;
+        }
+        if (plain_len > sizeof(req->h2_request_buffer))
+            return -1;
+        memcpy(req->h2_request_buffer, plain_dns, plain_len);
+        req->h2_request_len = plain_len;
+    }
     /* Parse DNS header: only check the qr flag. */
     hdr = (struct dns_header *)req->h2_request_buffer;
     if (hdr->qr != 0) {
@@ -848,22 +950,35 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     if (cd->h2 != 0) {
         const char max_age_tmpl[] = "max-age=%d";
         char max_age_txt[15];
+        const char *ctype = "application/dns-message";
+        const uint8_t *resp_ptr = buff;
+        uint8_t odoh_buf[ODOH_MAX_MESSAGE];
+        uint16_t odoh_len = 0;
+        uint32_t resp_len = (uint32_t)len;
         snprintf(max_age_txt, 15, max_age_tmpl, age);
+        if (oblivion_mode && req->is_odoh) {
+            if (odoh_target_encrypt_response(&req->odoh_ctx,
+                    buff, (uint16_t)len, odoh_buf, &odoh_len) != 0)
+                goto destroy;
+            ctype = "application/oblivious-dns-message";
+            resp_ptr = odoh_buf;
+            resp_len = odoh_len;
+        }
         nghttp2_nv nva[] = {
             MAKE_NV(":status", "200"),
-            MAKE_NV("content-type", "application/dns-message"),
+            MAKE_NV("content-type", ctype),
             MAKE_NV("server", "dohd"),
             MAKE_NV("cache-control", max_age_txt),
         };
-        req->h2_response_data = malloc(len);
+        req->h2_response_data = malloc(resp_len);
         check_stats();
         if (!req->h2_response_data) {
             dohprint(DOH_ERR, "Out-of-memory!\n");
             exit(1);
         }
-        DOH_Stats.mem += len;
-        memcpy(req->h2_response_data, buff, len);
-        req->h2_response_len = len;
+        DOH_Stats.mem += resp_len;
+        memcpy(req->h2_response_data, resp_ptr, resp_len);
+        req->h2_response_len = resp_len;
         memset(&data_prd, 0, sizeof(data_prd));
         data_prd.source.ptr = req;
         data_prd.read_callback = h2_cb_req_submit;
@@ -946,7 +1061,16 @@ static int h2_cb_on_frame_recv(nghttp2_session *session,
                 if ((!req)) {
                     return 0;
                 }
-                if (req->h2_request_len > 0)
+                if (!req->content_type_seen || req->is_odoh < 0 ||
+                        (oblivion_mode && req->is_odoh == 0) ||
+                        (!oblivion_mode && req->is_odoh == 1)) {
+                    nghttp2_nv nva[] = {
+                        MAKE_NV(":status", "415"),
+                        MAKE_NV("server", "dohd"),
+                    };
+                    nghttp2_submit_response(session, frame->hd.stream_id, nva, 2, NULL);
+                    dohd_destroy_request(req);
+                } else if (req->h2_request_len > 0)
                     dns_send_request_h2(req);
                 else
                     dohd_destroy_request(req);
@@ -997,6 +1121,9 @@ static int h2_cb_on_header(nghttp2_session *session,
 {
 
     const char PATH[] = ":path";
+    const char CONTENT_TYPE[] = "content-type";
+    const char CT_DNS[] = "application/dns-message";
+    const char CT_ODOH[] = "application/oblivious-dns-message";
     const char GETDNS[] = "/?dns=";
     struct client_data *cd = (struct client_data *)user_data;
     struct req_slot *req;
@@ -1043,6 +1170,18 @@ static int h2_cb_on_header(nghttp2_session *session,
                     DOH_Stats.http2_get_requests++;
                     check_stats();
                 }
+            } else if ((namelen == strlen(CONTENT_TYPE)) &&
+                    memcmp(CONTENT_TYPE, name, namelen) == 0) {
+                req->content_type_seen = 1;
+                if (valuelen == strlen(CT_ODOH) &&
+                        memcmp(value, CT_ODOH, valuelen) == 0) {
+                    req->is_odoh = 1;
+                } else if (valuelen == strlen(CT_DNS) &&
+                        memcmp(value, CT_DNS, valuelen) == 0) {
+                    req->is_odoh = 0;
+                } else {
+                    req->is_odoh = -1;
+                }
             }
             break;
     }
@@ -1074,6 +1213,10 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
         } else {
             uint16_t proto_len;
             char *proto;
+            if (oblivion_mode && !proxy_auth_peer_allowed(cd->ssl, &proxy_set)) {
+                dohd_destroy_client(cd);
+                return;
+            }
             if (wolfSSL_ALPN_GetProtocol(cd->ssl, &proto, &proto_len) &&
                     (2 == proto_len) && strncmp(proto, "h2", 2) == 0) {
                 nghttp2_settings_entry iv[1] = {
@@ -1220,7 +1363,7 @@ static void usage(const char *name)
 
     fprintf(stderr, "%s, DNSoverHTTPS minimalist daemon.\n", name);
     fprintf(stderr, "License: AGPL\n");
-    fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-d dnsserver] [-F] [-u user] [-V] [-v] [-h]\n", name);
+    fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-d dnsserver] [-F] [-u user] [-O --odoh-config file --odoh-secret file] [-V] [-v] [-h]\n", name);
     fprintf(stderr, "\t'cert' and 'key': certificate and its private key.\n");
     fprintf(stderr, "\t'user' : login name (when running as root) to switch to (dropping permissions)\n");
     fprintf(stderr, "\tDefault values: port=8053 dnsserver=\"::1\"\n");
@@ -1228,6 +1371,7 @@ static void usage(const char *name)
     fprintf(stderr, "\tUse '-V' to show version\n");
     fprintf(stderr, "\tUse '-v' for verbose mode\n");
     fprintf(stderr, "\tUse '-F' for foreground mode\n");
+    fprintf(stderr, "\tUse '-O' for Oblivious DoH target mode\n");
     exit(0);
 }
 
@@ -1251,12 +1395,16 @@ int main(int argc, char *argv[])
         {"port", 1, 0, 'p'},
         {"dnsserver", 1, 0, 'd'},
         {"user", 1, 0, 'u'},
+        {"oblivion", 0, 0, 'O'},
+        {"odoh-config", 1, 0, 'C'},
+        {"odoh-secret", 1, 0, 'S'},
+        {"authorized-proxies-dir", 1, 0, 'P'},
         {"verbose", 0, 0, 'v'},
         {"do-not-fork", 0, 0, 'F'},
         {NULL, 0, 0, '\0' }
     };
     while(1) {
-        c = getopt_long(argc, argv, "hvVc:k:p:d:u:F" , long_options, &option_idx);
+        c = getopt_long(argc, argv, "hvVOc:k:p:d:u:C:S:P:F" , long_options, &option_idx);
         if (c < 0)
             break;
         switch(c) {
@@ -1321,6 +1469,21 @@ int main(int argc, char *argv[])
                     user = strdup(optarg);
                 }
                 break;
+            case 'O':
+                oblivion_mode = 1;
+                break;
+            case 'C':
+                free(odoh_config_file);
+                odoh_config_file = strdup(optarg);
+                break;
+            case 'S':
+                free(odoh_secret_file);
+                odoh_secret_file = strdup(optarg);
+                break;
+            case 'P':
+                free(authorized_proxy_dir);
+                authorized_proxy_dir = strdup(optarg);
+                break;
             case 'F':
                 foreground = 1;
                 break;
@@ -1335,6 +1498,19 @@ int main(int argc, char *argv[])
 
     if (!cert || !key)
         usage(argv[0]);
+
+    if (oblivion_mode) {
+        if (!odoh_config_file || !odoh_secret_file)
+            usage(argv[0]);
+        if (!authorized_proxy_dir)
+            authorized_proxy_dir = strdup("~/.config/dohd/proxies/");
+        resolved_proxy_dir = resolve_proxy_dir_path(authorized_proxy_dir, user);
+        if (!resolved_proxy_dir || reload_proxy_authorization() != 0 ||
+                reload_odoh_target() != 0) {
+            fprintf(stderr, "Error initializing ODoH files and authorized proxies directory\n");
+            exit(2);
+        }
+    }
 
     if (!foreground) {
         int pid = fork();
@@ -1352,6 +1528,7 @@ int main(int argc, char *argv[])
 
     /* Set SIGUSR1 */
     sigset(SIGUSR1, sig_stats);
+    sigset(SIGHUP, sig_stats);
 
     /* Set SIGINT */
     sigset(SIGINT, clean_exit);
@@ -1468,6 +1645,12 @@ int main(int argc, char *argv[])
         return -1;
     }
     dohprint(DOH_DEBUG, "SSL context initialized (TLS 1.3)");
+
+    if (oblivion_mode) {
+        wolfSSL_CTX_set_verify(wctx,
+            WOLFSSL_VERIFY_PEER | WOLFSSL_VERIFY_FAIL_IF_NO_PEER_CERT,
+            verify_always_ok);
+    }
 
     /* Enable session tickets for faster reconnection (1-RTT resume) */
     wolfSSL_CTX_set_session_cache_mode(wctx, WOLFSSL_SESS_CACHE_SERVER);

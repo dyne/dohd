@@ -4,20 +4,20 @@ CFLAGS := -Wall -Wextra -Wno-sign-compare -DVERSION=\"${VERSION}\" -fPIE
 LDFLAGS := -lwolfssl -lrt -lm -lnghttp2
 
 all: CFLAGS += -O3
-all: ns2dohd
+all: dohproxyd
 
 debug: CFLAGS += -ggdb -O0
-debug: ns2dohd
+debug: dohproxyd
 
 asan: CFLAGS += -fsanitize=address
 asan: LDFLAGS += -fsanitize=address
-asan: ns2dohd
+asan: dohproxyd
 
-odoh.o: ../src/odoh.c ../src/odoh.h
-	$(CC) $(CFLAGS) -c -o $@ ../src/odoh.c
+libevquick.o: ../src/libevquick.c ../src/libevquick.h ../src/heap.h
+	$(CC) $(CFLAGS) -c -o $@ ../src/libevquick.c
 
-ns2dohd: ns2dohd.o odoh.o
+dohproxyd: dohproxyd.o libevquick.o
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 clean:
-	rm -f *.o ns2dohd
+	rm -f *.o dohproxyd
