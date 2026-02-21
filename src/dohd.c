@@ -680,6 +680,14 @@ static int dns_send_request_h2(struct req_slot *req)
     }
     req->ev_dns = evquick_addevent(req->dns_sd, EVQUICK_EV_READ, dohd_reply,
             NULL, req);
+    if (!req->ev_dns) {
+        /* Event registration failed - destroy request immediately */
+        dohprint(DOH_ERR, "Failed to register DNS socket event");
+        DOH_Stats.socket_errors++;
+        check_stats();
+        dohd_destroy_request(req);
+        return -1;
+    }
     ret = sendto(req->dns_sd, req->h2_request_buffer, req->h2_request_len, 0,
             (struct sockaddr *)req->resolver, req->resolver_sz);
     if (ret < 0) {
@@ -1070,9 +1078,16 @@ static int h2_cb_on_frame_recv(nghttp2_session *session,
                     };
                     nghttp2_submit_response(session, frame->hd.stream_id, nva, 2, NULL);
                     dohd_destroy_request(req);
-                } else if (req->h2_request_len > 0)
-                    dns_send_request_h2(req);
-                else
+                } else if (req->h2_request_len > 0) {
+                    if (dns_send_request_h2(req) < 0) {
+                        /* Request already destroyed by dns_send_request_h2, send error */
+                        nghttp2_nv nva[] = {
+                            MAKE_NV(":status", "500"),
+                            MAKE_NV("server", "dohd"),
+                        };
+                        nghttp2_submit_response(session, frame->hd.stream_id, nva, 2, NULL);
+                    }
+                } else
                     dohd_destroy_request(req);
             }
             break;

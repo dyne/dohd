@@ -1067,8 +1067,10 @@ static void accept_client(int fd, short revents, void *arg)
 static void usage(const char *name)
 {
     fprintf(stderr, "%s, ODoH proxy with legacy RFC8484 forwarding.\n", name);
-    fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-u user] [-A cafile] [--target-url https://host/path]... [--targets-file file] [--target-cert cert --target-key key] [-F] [-v] [-V] [-h]\n", name);
+    fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-4|-6] [-u user] [-A cafile] [--target-url https://host/path]... [--targets-file file] [--target-cert cert --target-key key] [-F] [-v] [-V] [-h]\n", name);
     fprintf(stderr, "  cert/key: TLS server certificate and key\n");
+    fprintf(stderr, "  -4: force IPv4 only\n");
+    fprintf(stderr, "  -6: force IPv6 only (default: dual-stack)\n");
     fprintf(stderr, "  -A/--ca-file: CA bundle for verifying upstream target TLS certs\n");
     fprintf(stderr, "  --target-url: repeatable legacy RFC8484 target URL\n");
     fprintf(stderr, "  --targets-file: file with target URLs (one per line)\n");
@@ -1083,11 +1085,13 @@ int main(int argc, char *argv[])
     char *targets_file = NULL;
     char *upstream_cafile = NULL;
     uint16_t port = PROXY_PORT;
+    int ip_version = 0;  /* 0 = dual-stack, 4 = IPv4 only, 6 = IPv6 only */
     int foreground = 0;
     int loglvl = DOH_WARN;
     int c, option_idx = 0;
     int yes = 1;
-    struct sockaddr_in6 addr;
+    struct sockaddr_in6 addr6;
+    struct sockaddr_in addr4;
     struct option long_options[] = {
         {"help", 0, 0, 'h'},
         {"version", 0, 0, 'V'},
@@ -1102,11 +1106,13 @@ int main(int argc, char *argv[])
         {"target-key", 1, 0, 'y'},
         {"target-url", 1, 0, 't'},
         {"targets-file", 1, 0, 'T'},
+        {"ipv4", 0, 0, '4'},
+        {"ipv6", 0, 0, '6'},
         {NULL, 0, 0, 0}
     };
 
     while (1) {
-        c = getopt_long(argc, argv, "hVc:k:p:u:A:vFx:y:t:T:", long_options, &option_idx);
+        c = getopt_long(argc, argv, "46hVc:k:p:u:A:vFx:y:t:T:", long_options, &option_idx);
         if (c < 0)
             break;
 
@@ -1122,6 +1128,8 @@ int main(int argc, char *argv[])
             case 'F': foreground = 1; break;
             case 'x': target_client_cert = strdup(optarg); break;
             case 'y': target_client_key = strdup(optarg); break;
+            case '4': ip_version = 4; break;
+            case '6': ip_version = 6; break;
             case 't':
                 if (add_target_url(optarg) != 0)
                     return 2;
@@ -1181,19 +1189,50 @@ int main(int argc, char *argv[])
     if (wolfSSL_CTX_use_PrivateKey_file(srv_ctx, key, SSL_FILETYPE_PEM) != SSL_SUCCESS)
         return 1;
 
-    lfd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (lfd < 0)
-        return 1;
+    /* Create listening socket based on IP version preference */
+    if (ip_version == 4) {
+        /* IPv4 only */
+        lfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (lfd < 0)
+            return 1;
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (char *)&yes, sizeof(yes));
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, (char *)&yes, sizeof(yes));
 
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (char *)&yes, sizeof(yes));
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, (char *)&yes, sizeof(yes));
+        memset(&addr4, 0, sizeof(addr4));
+        addr4.sin_family = AF_INET;
+        addr4.sin_addr.s_addr = INADDR_ANY;
+        addr4.sin_port = htons(port);
 
-    memset(&addr, 0, sizeof(addr));
-    addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(port);
+        if (bind(lfd, (struct sockaddr *)&addr4, sizeof(addr4)) != 0)
+            return 1;
+        dohprint(DOH_NOTICE, "dohproxyd listening on 0.0.0.0:%u (IPv4 only)", port);
+    } else {
+        /* IPv6 (with or without dual-stack) */
+        lfd = socket(AF_INET6, SOCK_STREAM, 0);
+        if (lfd < 0)
+            return 1;
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (char *)&yes, sizeof(yes));
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, (char *)&yes, sizeof(yes));
 
-    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
-        return 1;
+        if (ip_version == 6) {
+            /* IPv6 only - disable dual-stack */
+            int ipv6only = 1;
+            setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6only, sizeof(ipv6only));
+        }
+
+        memset(&addr6, 0, sizeof(addr6));
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_addr = in6addr_any;
+        addr6.sin6_port = htons(port);
+
+        if (bind(lfd, (struct sockaddr *)&addr6, sizeof(addr6)) != 0)
+            return 1;
+
+        if (ip_version == 6)
+            dohprint(DOH_NOTICE, "dohproxyd listening on [::]:%u (IPv6 only)", port);
+        else
+            dohprint(DOH_NOTICE, "dohproxyd listening on [::]:%u (dual-stack)", port);
+    }
 
     if (listen(lfd, 32) != 0)
         return 1;
@@ -1207,7 +1246,6 @@ int main(int argc, char *argv[])
     }
 
     evquick_addevent(lfd, EVQUICK_EV_READ, accept_client, NULL, NULL);
-    dohprint(DOH_NOTICE, "dohproxyd listening on [::]:%u", port);
 
     while (run)
         evquick_loop();

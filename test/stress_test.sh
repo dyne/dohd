@@ -115,6 +115,8 @@ worker() {
         result=$(curl -s -k --http2 -4 \
             --connect-timeout 2 \
             --max-time 5 \
+            -H "Accept: application/dns-message" \
+            -H "Content-Type: application/dns-message" \
             -o /dev/null \
             -w "%{http_code}" \
             "https://127.0.0.1:$PORT/?dns=$dns_q" 2>&1)
@@ -177,7 +179,7 @@ fi
 # Verify responding
 echo "Verifying dohd is responsive..."
 for i in {1..5}; do
-    if timeout 5 curl -s -k --http2 -4 "https://127.0.0.1:$PORT/?dns=${DNS_QUERIES[0]}" -o /dev/null 2>&1; then
+    if timeout 5 curl -s -k --http2 -4 -H "Accept: application/dns-message" -H "Content-Type: application/dns-message" "https://127.0.0.1:$PORT/?dns=${DNS_QUERIES[0]}" -o /dev/null 2>&1; then
         echo "dohd is responding"
         break
     fi
@@ -218,7 +220,7 @@ while [ $(date +%s) -lt $END_TIME ]; do
     fi
     
     # Health check
-    if ! timeout 5 curl -s -k --http2 -4 "https://127.0.0.1:$PORT/?dns=${DNS_QUERIES[0]}" -o /dev/null 2>&1; then
+    if ! timeout 5 curl -s -k --http2 -4 -H "Accept: application/dns-message" -H "Content-Type: application/dns-message" "https://127.0.0.1:$PORT/?dns=${DNS_QUERIES[0]}" -o /dev/null 2>&1; then
         echo "WARNING: Health check failed at $(date +%H:%M:%S)"
     fi
     
