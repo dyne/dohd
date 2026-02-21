@@ -56,6 +56,9 @@ ns2dohd -d https://dns.dyne.org/dns-query -u nobody
 Common options:
 
 - `-d <https://...>` DoH endpoint URL (mandatory)
+- `-O` enable ODoH client mode
+- `--odoh-proxy <https://...>` ODoH proxy URL (required with `-O`)
+- `--odoh-config <file>` binary target ODoH config file (required with `-O`)
 - `-p <port>` local UDP port (default: `53`)
 - `-u <user>` drop privileges after bind
 - `-r <resolver_ip>` bootstrap resolver used to resolve the DoH endpoint host (default: `1.1.1.1`)
@@ -93,6 +96,14 @@ Notes:
 
 - `ns2dohd` uses a separate bootstrap resolver (default `1.1.1.1`) for resolving the DoH endpoint hostname, avoiding resolver recursion.
 - Change bootstrap resolver with `-r`, for example `-r 9.9.9.9`.
+- In ODoH mode, the `-d` endpoint is the target resolver and is automatically passed to the proxy as `targethost` and `targetpath`.
+
+## ODoH deployment warning (RFC 9230)
+
+Do not treat a same-host or same-organization proxy+target deployment as private ODoH operation.
+The ODoH threat model assumes independent proxy and target operators.
+
+Local co-location is only suitable for protocol evaluation and debugging.
 
 ***
 # 💼 License

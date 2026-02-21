@@ -1,0 +1,51 @@
+name: PR Build Install Selftest
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-install-selftest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwolfssl-dev \
+            libnghttp2-dev \
+            curl \
+            openssl \
+            xxd \
+            iproute2
+
+      - name: Build
+        run: |
+          make -j"$(nproc)"
+
+      - name: Install to staging prefix
+        run: |
+          make install DESTDIR=/tmp/dohd-install-ci VERSION=0.8
+          test -x /tmp/dohd-install-ci/usr/local/sbin/dohd
+          test -x /tmp/dohd-install-ci/usr/local/sbin/dohproxyd
+          test -x /tmp/dohd-install-ci/usr/local/sbin/ns2dohd
+          test -x /tmp/dohd-install-ci/usr/local/sbin/odoh-keygen
+
+      - name: Run ODoH proxy+target self-test
+        run: |
+          DOHD_BIN=/tmp/dohd-install-ci/usr/local/sbin/dohd \
+          DOHPROXYD_BIN=/tmp/dohd-install-ci/usr/local/sbin/dohproxyd \
+          WORKDIR=/tmp/dohd-odoh-selftest \
+          examples/odoh/selftest-proxy-target-curl.sh
+
+      - name: Upload self-test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odoh-selftest-logs
+          path: /tmp/dohd-odoh-selftest
+          if-no-files-found: ignore

@@ -1,0 +1,69 @@
+.TH ODOH-KEYGEN 1 "February 2026" "dohd 0.8" "User Commands"
+.SH NAME
+\fBodoh-keygen\fR \- generate ODoH X25519 key material in dohd-native formats
+.SH SYNOPSIS
+.B odoh-keygen
+[
+.B \-s
+.I secret.bin
+] [
+.B \-p
+.I public.bin
+] [
+.B \-c
+.I odoh.config
+] [
+.B \-h
+]
+.SH DESCRIPTION
+.B odoh-keygen
+uses wolfCrypt to generate an X25519 key pair and writes files directly in
+the formats expected by
+.BR dohd (8)
+and
+.BR ns2dohd (8):
+.IP
+\(bu raw 32-byte private key for
+.B \-\-odoh-secret
+.IP
+\(bu raw 32-byte public key
+.IP
+\(bu binary
+.B ObliviousDoHConfigs
+blob for
+.B \-\-odoh-config
+.SH OPTIONS
+.TP
+.BI \-s " secret.bin"
+Output path for raw 32-byte secret key.
+Default:
+.I odoh-target.secret
+.TP
+.BI \-p " public.bin"
+Output path for raw 32-byte public key.
+Default:
+.I odoh-target.public
+.TP
+.BI \-c " odoh.config"
+Output path for binary ODoH config blob.
+Default:
+.I odoh-target.config
+.TP
+.B \-h
+Print help and exit.
+.SH EXAMPLE
+.nf
+ odoh-keygen -s /etc/dohd/odoh-target.secret \\
+             -p /etc/dohd/odoh-target.public \\
+             -c /etc/dohd/odoh-target.config
+.fi
+.SH SECURITY NOTES
+Key generation alone does not provide ODoH privacy.
+Per RFC 9230 deployment guidance, run proxy and target under independent
+operators and infrastructure. Co-location is for protocol testing only.
+.SH SEE ALSO
+.BR dohd (8),
+.BR dohproxyd (8),
+.BR ns2dohd (8)
+.SH LICENSE
+GNU AGPLv3.

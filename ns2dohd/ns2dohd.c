@@ -36,6 +36,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../src/odoh.h"
+
 #define NS2DOHD_PORT 53
 #define DNS_BUFFER_MAXSIZE 4096
 #define DNS_HEADER_MIN 12
@@ -192,8 +194,11 @@ static void usage(const char *name)
 {
     fprintf(stderr, "%s, local DNS to DoH forwarder daemon.\n", name);
     fprintf(stderr, "License: AGPL\n");
-    fprintf(stderr, "Usage: %s -d https://host/path [-p port] [-u user] [-r resolver] [-A cafile] [-F] [-v] [-V] [-h]\n", name);
+    fprintf(stderr, "Usage: %s -d https://host/path [-O --odoh-proxy url --odoh-config file] [-p port] [-u user] [-r resolver] [-A cafile] [-F] [-v] [-V] [-h]\n", name);
     fprintf(stderr, "\t'-d': DoH upstream URL (mandatory, https only)\n");
+    fprintf(stderr, "\t'-O': Oblivious DoH client mode\n");
+    fprintf(stderr, "\t'--odoh-proxy': ODoH proxy URL (required with -O)\n");
+    fprintf(stderr, "\t'--odoh-config': ODoH target config file (required with -O)\n");
     fprintf(stderr, "\t'-p': local UDP listen port (default: 53)\n");
     fprintf(stderr, "\t'-u': user to switch to after binding (root only)\n");
     fprintf(stderr, "\t'-r': bootstrap DNS resolver IP (default: 1.1.1.1)\n");
@@ -312,6 +317,66 @@ static int parse_doh_url(const char *url, struct doh_upstream *up)
             snprintf(up->authority, sizeof(up->authority), "%s:%s", up->host, up->port);
     }
 
+    return 0;
+}
+
+static int url_encode_component(const char *in, char *out, size_t out_sz)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t i;
+    size_t o = 0;
+
+    if (!in || !out || out_sz == 0)
+        return -1;
+
+    for (i = 0; in[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)in[i];
+        int unreserved = ((c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '.' || c == '_' || c == '~');
+
+        if (unreserved) {
+            if ((o + 1) >= out_sz)
+                return -1;
+            out[o++] = (char)c;
+            continue;
+        }
+
+        if ((o + 3) >= out_sz)
+            return -1;
+        out[o++] = '%';
+        out[o++] = hex[(c >> 4) & 0x0F];
+        out[o++] = hex[c & 0x0F];
+    }
+
+    out[o] = '\0';
+    return 0;
+}
+
+static int build_odoh_proxy_path(struct doh_upstream *proxy_up,
+    const struct doh_upstream *target_up)
+{
+    char enc_host[1024];
+    char enc_path[1024];
+    char newpath[sizeof(proxy_up->path)];
+    const char *sep;
+
+    if (!proxy_up || !target_up)
+        return -1;
+
+    if (url_encode_component(target_up->authority, enc_host, sizeof(enc_host)) != 0)
+        return -1;
+    if (url_encode_component(target_up->path, enc_path, sizeof(enc_path)) != 0)
+        return -1;
+
+    sep = strchr(proxy_up->path, '?') ? "&" : "?";
+    if (snprintf(newpath, sizeof(newpath), "%s%stargethost=%s&targetpath=%s",
+            proxy_up->path, sep, enc_host, enc_path) >= (int)sizeof(newpath)) {
+        return -1;
+    }
+
+    strcpy(proxy_up->path, newpath);
     return 0;
 }
 
@@ -754,6 +819,7 @@ static int h2_on_stream_close_cb(nghttp2_session *session,
 
 static int doh_query_roundtrip(WOLFSSL_CTX *wctx,
     const struct doh_upstream *up,
+    const char *media_type,
     const uint8_t *query,
     size_t query_len,
     uint8_t *reply,
@@ -855,8 +921,8 @@ static int doh_query_roundtrip(WOLFSSL_CTX *wctx,
     nva[1] = MAKE_NV(":scheme", "https");
     nva[2] = MAKE_NV(":authority", up->authority);
     nva[3] = MAKE_NV(":path", up->path);
-    nva[4] = MAKE_NV("content-type", "application/dns-message");
-    nva[5] = MAKE_NV("accept", "application/dns-message");
+    nva[4] = MAKE_NV("content-type", media_type);
+    nva[5] = MAKE_NV("accept", media_type);
     nva[6] = MAKE_NV("content-length", clength);
 
     data_prd.source.ptr = &x;
@@ -931,8 +997,13 @@ fail:
 int main(int argc, char *argv[])
 {
     struct doh_upstream upstream;
+    struct doh_upstream odoh_proxy_upstream;
+    odoh_config odoh_cfg;
+    odoh_client_ctx odoh_client = {};
     WOLFSSL_CTX *wctx = NULL;
     char *url = NULL;
+    char *odoh_proxy_url = NULL;
+    char *odoh_config_path = NULL;
     char *cafile = NULL;
     char *user = NULL;
     char *resolver_ip = NULL;
@@ -941,6 +1012,7 @@ int main(int argc, char *argv[])
     int option_idx = 0;
     int c;
     int lfd = -1;
+    int odoh_mode = 0;
     struct sockaddr_in addr;
     uint8_t dns_req[DNS_BUFFER_MAXSIZE];
     uint8_t dns_rep[DNS_BUFFER_MAXSIZE];
@@ -952,6 +1024,9 @@ int main(int argc, char *argv[])
         {"help", 0, 0, 'h'},
         {"version", 0, 0, 'V'},
         {"doh-url", 1, 0, 'd'},
+        {"oblivion", 0, 0, 'O'},
+        {"odoh-proxy", 1, 0, 'P'},
+        {"odoh-config", 1, 0, 'C'},
         {"port", 1, 0, 'p'},
         {"user", 1, 0, 'u'},
         {"resolver", 1, 0, 'r'},
@@ -963,7 +1038,7 @@ int main(int argc, char *argv[])
     struct sigaction sa = {};
 
     while (1) {
-        c = getopt_long(argc, argv, "hVd:p:u:r:A:vF", long_options, &option_idx);
+        c = getopt_long(argc, argv, "hVOd:P:C:p:u:r:A:vF", long_options, &option_idx);
         if (c < 0)
             break;
 
@@ -977,6 +1052,17 @@ int main(int argc, char *argv[])
             case 'd':
                 free(url);
                 url = strdup(optarg);
+                break;
+            case 'O':
+                odoh_mode = 1;
+                break;
+            case 'P':
+                free(odoh_proxy_url);
+                odoh_proxy_url = strdup(optarg);
+                break;
+            case 'C':
+                free(odoh_config_path);
+                odoh_config_path = strdup(optarg);
                 break;
             case 'p':
                 if (parse_port(optarg, &port) != 0) {
@@ -1034,6 +1120,49 @@ int main(int argc, char *argv[])
         return 2;
     }
 
+    if (odoh_mode) {
+        if (!odoh_proxy_url || !odoh_config_path) {
+            fprintf(stderr, "Error: -O requires --odoh-proxy and --odoh-config\n");
+            free(user);
+            free(resolver_ip);
+            free(cafile);
+            free(odoh_proxy_url);
+            free(odoh_config_path);
+            free(url);
+            return 2;
+        }
+        if (parse_doh_url(odoh_proxy_url, &odoh_proxy_upstream) != 0) {
+            fprintf(stderr, "Invalid ODoH proxy URL: %s\n", odoh_proxy_url);
+            free(user);
+            free(resolver_ip);
+            free(cafile);
+            free(odoh_proxy_url);
+            free(odoh_config_path);
+            free(url);
+            return 2;
+        }
+        if (odoh_config_load_file(odoh_config_path, &odoh_cfg) != 0) {
+            fprintf(stderr, "Invalid ODoH config file: %s\n", odoh_config_path);
+            free(user);
+            free(resolver_ip);
+            free(cafile);
+            free(odoh_proxy_url);
+            free(odoh_config_path);
+            free(url);
+            return 2;
+        }
+        if (build_odoh_proxy_path(&odoh_proxy_upstream, &upstream) != 0) {
+            fprintf(stderr, "Invalid ODoH proxy/target path combination\n");
+            free(user);
+            free(resolver_ip);
+            free(cafile);
+            free(odoh_proxy_url);
+            free(odoh_config_path);
+            free(url);
+            return 2;
+        }
+    }
+
     if (!resolver_ip)
         resolver_ip = strdup(DEFAULT_BOOTSTRAP_DNS_IP);
     if (!resolver_ip ||
@@ -1055,6 +1184,8 @@ int main(int argc, char *argv[])
             free(user);
             free(resolver_ip);
             free(cafile);
+            free(odoh_proxy_url);
+            free(odoh_config_path);
             free(url);
             return 0;
         }
@@ -1066,6 +1197,8 @@ int main(int argc, char *argv[])
             free(user);
             free(resolver_ip);
             free(cafile);
+            free(odoh_proxy_url);
+            free(odoh_config_path);
             free(url);
             return 0;
         }
@@ -1195,12 +1328,44 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        if (doh_query_roundtrip(wctx, &upstream, dns_req, (size_t)n, dns_rep, &reply_len) != 0) {
+        if (odoh_mode) {
+            uint8_t odoh_req[ODOH_MAX_MESSAGE];
+            uint8_t odoh_rep[ODOH_MAX_MESSAGE];
+            uint16_t odoh_req_len = 0;
+            uint16_t dns_out_len = 0;
+            if (odoh_client_encrypt_query(&odoh_cfg, dns_req, (uint16_t)n,
+                    odoh_req, &odoh_req_len, &odoh_client) != 0) {
+                stats.errors++;
+                goto odoh_fail;
+            }
+            if (doh_query_roundtrip(wctx, &odoh_proxy_upstream,
+                    "application/oblivious-dns-message",
+                    odoh_req, odoh_req_len,
+                    odoh_rep, &reply_len) != 0) {
+                stats.errors++;
+                goto odoh_fail;
+            }
+            if (odoh_client_decrypt_response(&odoh_client, odoh_rep, (uint16_t)reply_len,
+                    dns_rep, &dns_out_len) != 0) {
+                stats.errors++;
+                goto odoh_fail;
+            }
+            reply_len = dns_out_len;
+            goto reply_send;
+odoh_fail:
+            if (make_servfail(dns_req, (size_t)n, dns_rep, &reply_len) == 0)
+                stats.servfail_replies++;
+            else
+                continue;
+            dohprint(DOH_WARN, "upstream ODoH request failed, returned SERVFAIL");
+        } else if (doh_query_roundtrip(wctx, &upstream,
+                "application/dns-message", dns_req, (size_t)n, dns_rep, &reply_len) != 0) {
             if (strcmp(upstream.path, "/") == 0) {
                 struct doh_upstream alt = upstream;
                 strcpy(alt.path, "/dns-query");
                 dohprint(DOH_DEBUG, "retrying DoH query on fallback path");
-                if (doh_query_roundtrip(wctx, &alt, dns_req, (size_t)n, dns_rep, &reply_len) == 0)
+                if (doh_query_roundtrip(wctx, &alt, "application/dns-message",
+                        dns_req, (size_t)n, dns_rep, &reply_len) == 0)
                     goto reply_send;
             }
             stats.errors++;
@@ -1229,6 +1394,8 @@ reply_send:
     free(user);
     free(resolver_ip);
     free(cafile);
+    free(odoh_proxy_url);
+    free(odoh_config_path);
 
     if (!foreground)
         closelog();

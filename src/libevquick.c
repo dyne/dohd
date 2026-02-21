@@ -348,11 +348,15 @@ CTX evquick_init(void)
     if (!ctx)
         return NULL;
     ctx->giveup = 0;
+    ctx->epfd = -1;
+    ctx->time_machine[0] = -1;
+    ctx->time_machine[1] = -1;
+
     ctx->timers = heap_init();
     if (!ctx->timers)
-        return NULL;
+        goto fail;
     if(pipe(ctx->time_machine) < 0)
-        return NULL;
+        goto fail;
     (void)yes;
     fcntl(ctx->time_machine[1], F_SETFL, O_NONBLOCK);
 
@@ -360,7 +364,7 @@ CTX evquick_init(void)
     ctx->epfd = epoll_create1(0);
     if (ctx->epfd < 0) {
         perror("epoll_create1");
-        return NULL;
+        goto fail;
     }
 
     /* Add time_machine pipe to epoll for timer wakeups */
@@ -368,8 +372,7 @@ CTX evquick_init(void)
     ev.data.ptr = NULL;  /* NULL ptr indicates time_machine */
     if (epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, ctx->time_machine[0], &ev) < 0) {
         perror("epoll_ctl time_machine");
-        close(ctx->epfd);
-        return NULL;
+        goto fail;
     }
 
     ctx->n_events = 1;
@@ -378,11 +381,23 @@ CTX evquick_init(void)
     act.sa_flags = SA_NODEFER;
     if (sigaction(SIGALRM, &act, NULL) < 0) {
         perror("Setting alarm signal");
-        return NULL;
+        goto fail;
     }
     ctx_add(ctx);
     timer_new(ctx);
     return ctx;
+
+fail:
+    if (ctx->epfd >= 0)
+        close(ctx->epfd);
+    if (ctx->time_machine[0] >= 0)
+        close(ctx->time_machine[0]);
+    if (ctx->time_machine[1] >= 0)
+        close(ctx->time_machine[1]);
+    if (ctx->timers)
+        heap_destroy(ctx->timers);
+    free(ctx);
+    return NULL;
 }
 
 
@@ -456,7 +471,10 @@ void evquick_loop(void)
             /* NULL ptr means time_machine pipe for timer wakeups */
             if (e == NULL) {
                 char discard;
-                read(ctx->time_machine[0], &discard, 1);
+                if (read(ctx->time_machine[0], &discard, 1) < 0) {
+                    if (errno != EINTR && errno != EAGAIN)
+                        perror("time_machine read");
+                }
                 timer_check(ctx);
                 continue;
             }
