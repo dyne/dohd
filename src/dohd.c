@@ -826,14 +826,27 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
     req = (struct req_slot *)arg;
     cd = req->owner;
 
-    /* Cancel timeout timer - we got a response */
+    /* Cancel timeout timer - we got a response (or error) */
     if (req->timeout_timer) {
         evquick_deltimer(req->timeout_timer);
         req->timeout_timer = NULL;
     }
 
     len = recv(fd, buff, bufsz, 0);
+    if (len <= 0) {
+        /* recv() error or connection closed */
+        if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            /* Socket timeout (SO_RCVTIMEO) - not a real error, just no data yet.
+             * This shouldn't happen with epoll (event only fires when data ready),
+             * but handle gracefully. */
+            dohprint(DOH_WARN, "DNS socket recv timeout (fd %d)", fd);
+        }
+        /* Don't log for normal close (len == 0) or transient errors */
+        goto destroy;
+    }
     if (len < 16) {
+        /* DNS response too short to be valid */
+        dohprint(DOH_WARN, "DNS response too short (%d bytes)", len);
         goto destroy;
     }
 
@@ -1220,10 +1233,12 @@ static void usage(const char *name)
 
     fprintf(stderr, "%s, DNSoverHTTPS minimalist daemon.\n", name);
     fprintf(stderr, "License: AGPL\n");
-    fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-d dnsserver] [-F] [-u user] [-V] [-v] [-h]\n", name);
+    fprintf(stderr, "Usage: %s -c cert -k key [-p port] [-d dnsserver] [-4|-6] [-F] [-u user] [-V] [-v] [-h]\n", name);
     fprintf(stderr, "\t'cert' and 'key': certificate and its private key.\n");
     fprintf(stderr, "\t'user' : login name (when running as root) to switch to (dropping permissions)\n");
     fprintf(stderr, "\tDefault values: port=8053 dnsserver=\"::1\"\n");
+    fprintf(stderr, "\tUse '-4' to force IPv4 only\n");
+    fprintf(stderr, "\tUse '-6' to force IPv6 only (default: dual-stack)\n");
     fprintf(stderr, "\tUse '-h' for help\n");
     fprintf(stderr, "\tUse '-V' to show version\n");
     fprintf(stderr, "\tUse '-v' for verbose mode\n");
@@ -1237,7 +1252,9 @@ int main(int argc, char *argv[])
     char *cert = NULL, *key = NULL;
     char *user = NULL;
     uint16_t port = DOH_PORT;
-    struct sockaddr_in6 serv_addr;
+    int ip_version = 0;  /* 0 = dual-stack (default), 4 = IPv4 only, 6 = IPv6 only */
+    struct sockaddr_in6 serv_addr6;
+    struct sockaddr_in serv_addr4;
     int option_idx;
     int c;
     int foreground = 0;
@@ -1253,10 +1270,12 @@ int main(int argc, char *argv[])
         {"user", 1, 0, 'u'},
         {"verbose", 0, 0, 'v'},
         {"do-not-fork", 0, 0, 'F'},
+        {"ipv4", 0, 0, '4'},
+        {"ipv6", 0, 0, '6'},
         {NULL, 0, 0, '\0' }
     };
     while(1) {
-        c = getopt_long(argc, argv, "hvVc:k:p:d:u:F" , long_options, &option_idx);
+        c = getopt_long(argc, argv, "46hvVc:k:p:d:u:F" , long_options, &option_idx);
         if (c < 0)
             break;
         switch(c) {
@@ -1324,6 +1343,12 @@ int main(int argc, char *argv[])
             case 'F':
                 foreground = 1;
                 break;
+            case '4':
+                ip_version = 4;
+                break;
+            case '6':
+                ip_version = 6;
+                break;
             default:
                 fprintf(stderr, "Unrecognized option '%c'\n\n\n",c);
                 usage(argv[0]);
@@ -1388,25 +1413,56 @@ int main(int argc, char *argv[])
     }
     dohprint(DOH_NOTICE, "Using %u DNS servers", n_resolvers);
 
-    /* Create listening socket */
-    lfd = socket(AF_INET6, SOCK_STREAM, 0);
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (char *) &yes, sizeof(int));
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, (char *) &yes, sizeof(int));
-    if (lfd < 0) {
-        dohprint(DOH_ERR, "ERROR: failed to create DoH socket\n");
-        return -1;
-    }
-    dohprint(DOH_DEBUG, "Main HTTPS socket created.");
+    /* Create listening socket based on IP version preference */
+    if (ip_version == 4) {
+        /* IPv4 only */
+        lfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (lfd < 0) {
+            dohprint(DOH_ERR, "ERROR: failed to create IPv4 DoH socket\n");
+            return -1;
+        }
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (char *) &yes, sizeof(int));
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, (char *) &yes, sizeof(int));
 
-    /* Fill in the server address */
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin6_family      = AF_INET6;             /* using IPv4      */
-    serv_addr.sin6_port        = htons(port); /* on DEFAULT_PORT */
+        memset(&serv_addr4, 0, sizeof(serv_addr4));
+        serv_addr4.sin_family = AF_INET;
+        serv_addr4.sin_addr.s_addr = INADDR_ANY;
+        serv_addr4.sin_port = htons(port);
 
-    /* Bind the server socket to our port */
-    if (bind(lfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
-        fprintf(stderr, "ERROR: failed to bind\n");
-        return -1;
+        if (bind(lfd, (struct sockaddr*)&serv_addr4, sizeof(serv_addr4)) == -1) {
+            dohprint(DOH_ERR, "ERROR: failed to bind IPv4 socket\n");
+            return -1;
+        }
+        dohprint(DOH_NOTICE, "Listening on IPv4 only, port %u", port);
+    } else {
+        /* IPv6 (with or without dual-stack) */
+        lfd = socket(AF_INET6, SOCK_STREAM, 0);
+        if (lfd < 0) {
+            dohprint(DOH_ERR, "ERROR: failed to create IPv6 DoH socket\n");
+            return -1;
+        }
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (char *) &yes, sizeof(int));
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, (char *) &yes, sizeof(int));
+
+        if (ip_version == 6) {
+            /* IPv6 only - disable dual-stack */
+            int ipv6only = 1;
+            setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6only, sizeof(ipv6only));
+            dohprint(DOH_NOTICE, "Listening on IPv6 only, port %u", port);
+        } else {
+            /* Dual-stack (default) */
+            dohprint(DOH_NOTICE, "Listening on IPv4+IPv6 (dual-stack), port %u", port);
+        }
+
+        memset(&serv_addr6, 0, sizeof(serv_addr6));
+        serv_addr6.sin6_family = AF_INET6;
+        serv_addr6.sin6_addr = in6addr_any;
+        serv_addr6.sin6_port = htons(port);
+
+        if (bind(lfd, (struct sockaddr*)&serv_addr6, sizeof(serv_addr6)) == -1) {
+            dohprint(DOH_ERR, "ERROR: failed to bind IPv6 socket\n");
+            return -1;
+        }
     }
     dohprint(DOH_DEBUG, "Main HTTPS socket is bound.");
 
