@@ -79,15 +79,19 @@ static int write_odoh_config(const char *path, const uint8_t *pub, size_t pub_le
     {
         int fd = open(path, O_WRONLY | O_APPEND, 0644);
         ssize_t w;
+        size_t off = 0;
         if (fd < 0) {
             fprintf(stderr, "Cannot append to %s: %s\n", path, strerror(errno));
             return -1;
         }
-        w = write(fd, pub, pub_len);
-        if (w != (ssize_t)pub_len) {
-            close(fd);
-            fprintf(stderr, "Cannot append public key to %s\n", path);
-            return -1;
+        while (off < pub_len) {
+            w = write(fd, pub + off, pub_len - off);
+            if (w <= 0) {
+                close(fd);
+                fprintf(stderr, "Cannot append public key to %s: %s\n", path, strerror(errno));
+                return -1;
+            }
+            off += (size_t)w;
         }
         if (close(fd) != 0) {
             fprintf(stderr, "Cannot close %s: %s\n", path, strerror(errno));
