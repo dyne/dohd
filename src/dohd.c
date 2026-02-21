@@ -39,6 +39,7 @@
 #include "proxy_auth.h"
 #include <nghttp2/nghttp2.h>
 #include <netinet/tcp.h>
+#include <fcntl.h>
 
 #ifdef DMALLOC
 #include "dmalloc.h"
@@ -120,6 +121,7 @@ static struct doh_stats {
     uint64_t http2_post_requests;
     uint64_t http2_get_requests;
     uint64_t socket_errors;
+    uint64_t pool_exhausted;
 
     /* Memory (current, peak) */
     uint64_t mem;
@@ -225,6 +227,7 @@ static void printstats(void)
     dohprint(LOG_NOTICE, "- Failures:");
     dohprint(LOG_NOTICE, "    - Invalid HTTP requests: %lu", DOH_Stats.http_notvalid_requests);
     dohprint(LOG_NOTICE, "    - Socket errors: %lu", DOH_Stats.socket_errors);
+    dohprint(LOG_NOTICE, "    - Pool exhausted: %lu", DOH_Stats.pool_exhausted);
     dohprint(LOG_NOTICE, "- Memory usage:");
     dohprint(LOG_NOTICE, "    - Current: %lu Bytes, peak: %lu Bytes", DOH_Stats.mem, DOH_Stats.mem_peak);
     dohprint(LOG_NOTICE, "- Connected clients:");
@@ -1224,6 +1227,7 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             int err = wolfSSL_get_error(cd->ssl, ret);
             if (err == WOLFSSL_ERROR_WANT_READ || err == WOLFSSL_ERROR_WANT_WRITE)
                 return;
+            dohprint(DOH_DEBUG, "TLS handshake failed: error %d", err);
             dohd_destroy_client(cd);
         } else {
             uint16_t proto_len;
@@ -1258,6 +1262,9 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
     /* Read the client data into our buff array */
     ret = wolfSSL_read(cd->ssl, buff, DNS_BUFFER_MAXSIZE);
     if (ret < 0) {
+        int err = wolfSSL_get_error(cd->ssl, ret);
+        if (err == WOLFSSL_ERROR_WANT_READ || err == WOLFSSL_ERROR_WANT_WRITE)
+            return;  /* Non-blocking - wait for more data */
         dohd_destroy_client(cd);
         DOH_Stats.socket_errors++;
     } else if (ret == 0) {
@@ -1316,17 +1323,18 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
     int ret;
 #endif
 
-    cd = mempool_alloc(client_pool);
-    if (cd == NULL) {
-        dohprint(DOH_ERR, "Failed to allocate memory for a new connection\n\n");
-        return;
-    }
-
-    /* Accept client connections */
+    /* Accept client connections first to avoid leaving them in listen queue */
     connd = accept(lfd, NULL, &zero);
     if (connd < 0) {
         dohprint(DOH_WARN, "Failed to accept the connection: %s\n\n", strerror(errno));
-        mempool_free(client_pool, cd);
+        return;
+    }
+
+    cd = mempool_alloc(client_pool);
+    if (cd == NULL) {
+        dohprint(DOH_ERR, "Client pool exhausted, rejecting connection");
+        close(connd);
+        DOH_Stats.pool_exhausted++;
         return;
     }
 #ifdef OCSP_RESPONDER
@@ -1342,6 +1350,9 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
 #endif
     setsockopt(connd, IPPROTO_TCP, TCP_NODELAY, (char *) &yes, sizeof(int));
     setsockopt(connd, SOL_SOCKET, SO_REUSEADDR, (char *) &yes, sizeof(int));
+
+    /* Set socket to non-blocking for async TLS handshake */
+    fcntl(connd, F_SETFL, fcntl(connd, F_GETFL, 0) | O_NONBLOCK);
 
     /* Create a WOLFSSL object */
     cd->ssl = wolfSSL_new(wctx);
@@ -1687,8 +1698,8 @@ int main(int argc, char *argv[])
     dohprint(DOH_DEBUG, "Private key correctly imported");
 
 
-    /* Listen for a new connection, allow 10 pending connections */
-    if (listen(lfd, 10) == -1) {
+    /* Listen for a new connection, allow larger backlog for burst handling */
+    if (listen(lfd, 128) == -1) {
         dohprint(LOG_ERR, "ERROR: failed to listen\n");
         return -1;
     }
