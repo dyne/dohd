@@ -32,12 +32,13 @@ static inline int heap_insert(struct heap_##type *heap, type *el)               
     struct heap_element_##type etmp;                                                    \
     memcpy(&etmp.data, el, sizeof(type));                                               \
     if (++heap->n >= heap->size) {                                                      \
-        heap->top = realloc(heap->top,                                                  \
+        struct heap_element_##type *_tmp = realloc(heap->top,                           \
                 (heap->n + 1) * sizeof(struct heap_element_##type));                    \
-        if (!heap->top) {                                                               \
+        if (!_tmp) {                                                                    \
             heap->n--;                                                                  \
             return -1;                                                                  \
         }                                                                               \
+        heap->top = _tmp;                                                               \
         heap->size++;                                                                   \
     }                                                                                   \
     etmp.id = heap->last_id++;                                                          \
