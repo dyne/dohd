@@ -281,6 +281,7 @@ struct req_slot {
     uint32_t h2_response_len;
     int is_odoh;
     int content_type_seen;
+    int is_h2_get;
     odoh_req_ctx odoh_ctx;
     uint16_t id;
     struct sockaddr *resolver;
@@ -620,6 +621,7 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     req->timeout_timer = NULL;
     req->is_odoh = 0;
     req->content_type_seen = 0;
+    req->is_h2_get = 0;
     memset(&req->odoh_ctx, 0, sizeof(req->odoh_ctx));
     nghttp2_session_set_stream_user_data(cd->h2_session, stream_id, req);
     return req;
@@ -1072,7 +1074,7 @@ static int h2_cb_on_frame_recv(nghttp2_session *session,
                 if ((!req)) {
                     return 0;
                 }
-                if (!req->content_type_seen || req->is_odoh < 0 ||
+                if ((!req->content_type_seen && !req->is_h2_get) || req->is_odoh < 0 ||
                         (oblivion_mode && req->is_odoh == 0) ||
                         (!oblivion_mode && req->is_odoh == 1)) {
                     nghttp2_nv nva[] = {
@@ -1173,18 +1175,22 @@ static int h2_cb_on_header(nghttp2_session *session,
                 if (valuelen > strlen(GETDNS) && (strncmp((char*)value, GETDNS,
                                 strlen(GETDNS)) == 0) && (valuelen < DNS_BUFFER_MAXSIZE)) {
                     uint32_t outlen = DNS_BUFFER_MAXSIZE;
+                    size_t b64len = valuelen - strlen(GETDNS);
+                    char b64tmp[DNS_BUFFER_MAXSIZE];
+                    memcpy(b64tmp, value + strlen(GETDNS), b64len);
+                    b64tmp[b64len] = '\0';
                     req->h2_request_len = 0;
-                    if(dohd_url64_check((const char*)(value + 6)) == 0) {
+                    if(dohd_url64_check(b64tmp) == 0) {
                         dohd_destroy_request(req);
                         return 0;
                     }
-                    outlen = dohd_url64_decode((const char*)(value + 6),
-					       req->h2_request_buffer);
+                    outlen = dohd_url64_decode(b64tmp, req->h2_request_buffer);
                     if (outlen <= 0) {
                         dohd_destroy_request(req);
                         return 0;
                     }
                     req->h2_request_len = outlen;
+                    req->is_h2_get = 1;
                     DOH_Stats.http2_get_requests++;
                     check_stats();
                 }
@@ -1373,6 +1379,13 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
 
     cd->doh_sd = connd;
     cd->ev_doh = evquick_addevent(cd->doh_sd, EVQUICK_EV_READ, tls_read, tls_fail, cd);
+    if (!cd->ev_doh) {
+        dohprint(DOH_ERR, "ERROR: failed to register client event");
+        wolfSSL_free(cd->ssl);
+        close(connd);
+        mempool_free(client_pool, cd);
+        return;
+    }
 
     /* Insert into hash table - O(1) */
     client_hash_insert(cd);
