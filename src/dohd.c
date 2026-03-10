@@ -37,6 +37,7 @@
 #include "mempool.h"
 #include "odoh.h"
 #include "proxy_auth.h"
+#include "h2_session.h"
 #include <nghttp2/nghttp2.h>
 #include <netinet/tcp.h>
 #include <fcntl.h>
@@ -1018,13 +1019,7 @@ static ssize_t h2_cb_send(nghttp2_session *session, const uint8_t *data,
     struct client_data *cd = (struct client_data *)user_data;
     (void)session;
     (void)flags;
-    int ret;
-    ret = client_ssl_write(cd, data, length);
-
-    if (nghttp2_session_want_write(session)) {
-        nghttp2_session_send(session);
-    }
-    return ret;
+    return client_ssl_write(cd, data, length);
 }
 
 
@@ -1111,12 +1106,9 @@ static int h2_cb_on_stream_close(nghttp2_session *session, int32_t stream_id,
     struct client_data *cd = (struct client_data *)user_data;
     struct req_slot *req =
         nghttp2_session_get_stream_user_data(session, stream_id);
-    if (!req)
-        return -1;
-    if (cd != req->owner)
-        return -1;
     (void)error_code;
-    if (req)  {
+    if (dohd_h2_stream_close_action(req != NULL,
+            req != NULL && cd == req->owner) == DOHD_H2_STREAM_CLOSE_DESTROY) {
         dohd_destroy_request(req);
     }
     return 0;
@@ -1281,12 +1273,15 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             readlen = nghttp2_session_mem_recv(cd->h2_session, buff, ret);
             if (readlen < 0) {
                 dohprint(DOH_WARN, "NGHTTP2 error: %s\n", nghttp2_strerror((int)readlen));
+                dohd_destroy_client(cd);
                 return;
             }
             while (nghttp2_session_want_write(cd->h2_session)) {
                 ret = nghttp2_session_send(cd->h2_session);
                 if (ret < 0) {
                     dohprint(DOH_WARN, "NGHTTP2 error: %s\n", nghttp2_strerror((int)ret));
+                    dohd_destroy_client(cd);
+                    return;
                 }
             }
         } else {
