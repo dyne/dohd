@@ -73,6 +73,21 @@
 /* DNS request timeout in milliseconds */
 #define DNS_REQUEST_TIMEOUT_MS 5000
 
+/* Maximum time (ms) a single HTTP/2 stream may stay open before its request is
+ * completed and forwarded upstream. Reaps half-open/stalled streams that open
+ * HEADERS but never send END_STREAM, bounding occupancy of the request pool. */
+#define H2_STREAM_TIMEOUT_MS 10000
+
+/* Connection idle timeout (ms). A client connection with no read activity for
+ * this long is closed, reaping slow-loris / flow-control-stalled connections
+ * that would otherwise hold client and request pool slots open. */
+#define CLIENT_IDLE_TIMEOUT_MS 30000
+
+/* Maximum decoded request header list size advertised to peers via
+ * SETTINGS_MAX_HEADER_LIST_SIZE. DoH requests carry only a handful of small
+ * headers; this caps HPACK-expanded header sets and is enforced by nghttp2. */
+#define H2_MAX_HEADER_LIST_SIZE (8 * 1024)
+
 #define IP6_LOCALHOST { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }
 #define DOHD_REQ_MIN 20
 #define STR_HTTP2_PREFACE "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -297,6 +312,7 @@ struct client_data {
     int h2;
     nghttp2_session *h2_session;
     int doh_sd;
+    evquick_timer *idle_timer;       /* Connection idle timeout timer */
     struct client_data *next;
     struct req_slot *list;
 };
@@ -304,6 +320,7 @@ struct client_data {
 static void dohd_reply(int fd, short __attribute__((unused)) revents,
         void *arg);
 static void dohd_destroy_request(struct req_slot *req);
+static void dns_request_timeout(void *arg);
 
 /* Memory pools for client_data and req_slot */
 static mempool_t *client_pool = NULL;
@@ -485,6 +502,12 @@ static void dohd_destroy_client(struct client_data *cd)
             DOH_Stats.pending_requests--;
         rp = nxt;
     }
+    /* Cancel idle timeout timer if pending */
+    if (cd->idle_timer) {
+        evquick_deltimer(cd->idle_timer);
+        cd->idle_timer = NULL;
+    }
+
     /* Remove events from file desc */
     if (cd->ev_doh) {
         evquick_delevent(cd->ev_doh);
@@ -512,6 +535,33 @@ static void dohd_destroy_client(struct client_data *cd)
     check_stats();
 }
 
+/* Connection idle timeout - no read activity for CLIENT_IDLE_TIMEOUT_MS.
+ * Reaps slow-loris / flow-control-stalled connections that hold pool slots. */
+static void client_idle_timeout(void *arg)
+{
+    struct client_data *cd = (struct client_data *)arg;
+    /* One-shot timer has fired; clear stored pointer before destroying so
+     * dohd_destroy_client() does not attempt to cancel an already-freed timer. */
+    cd->idle_timer = NULL;
+    if (!client_hash_exists(cd))
+        return;
+    dohprint(DOH_DEBUG, "Closing idle client connection");
+    DOH_Stats.socket_errors++;
+    dohd_destroy_client(cd);
+}
+
+/* (Re)arm the per-connection idle timeout. Called at connection setup and on
+ * every read with activity, so the timer measures time since last activity. */
+static void client_arm_idle_timer(struct client_data *cd)
+{
+    if (cd->idle_timer) {
+        evquick_deltimer(cd->idle_timer);
+        cd->idle_timer = NULL;
+    }
+    cd->idle_timer = evquick_addtimer(CLIENT_IDLE_TIMEOUT_MS, 0,
+            client_idle_timeout, cd);
+}
+
 static void clean_exit(int __attribute__((unused)) signo)
 {
     /* Iterate hash table and destroy all clients */
@@ -535,6 +585,8 @@ static void clean_exit(int __attribute__((unused)) signo)
                 mempool_free(request_pool, rp);
                 rp = nxt;
             }
+            if (cd->idle_timer)
+                evquick_deltimer(cd->idle_timer);
             if (cd->ev_doh)
                 evquick_delevent(cd->ev_doh);
             if (cd->ssl)
@@ -625,6 +677,13 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     req->is_h2_get = 0;
     memset(&req->odoh_ctx, 0, sizeof(req->odoh_ctx));
     nghttp2_session_set_stream_user_data(cd->h2_session, stream_id, req);
+
+    /* Arm a stream timeout to reap half-open streams that never complete their
+     * request (no END_STREAM). This is re-armed with the upstream timeout once
+     * the request is actually forwarded in dns_send_request_h2(). */
+    req->timeout_timer = evquick_addtimer(H2_STREAM_TIMEOUT_MS, 0,
+            dns_request_timeout, req);
+
     return req;
 }
 
@@ -703,7 +762,12 @@ static int dns_send_request_h2(struct req_slot *req)
         return -1;
     }
 
-    /* Start timeout timer - if upstream doesn't respond, return 504 */
+    /* Cancel the stream-open timeout armed at request creation, then start the
+     * upstream timeout - if upstream doesn't respond, return 504 */
+    if (req->timeout_timer) {
+        evquick_deltimer(req->timeout_timer);
+        req->timeout_timer = NULL;
+    }
     req->timeout_timer = evquick_addtimer(DNS_REQUEST_TIMEOUT_MS, 0,
             dns_request_timeout, req);
 
@@ -1218,6 +1282,8 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
     /* Verify client still exists in hash table */
     if (!client_hash_exists(cd))
         return;
+    /* Read activity on this connection: reset the idle timeout */
+    client_arm_idle_timer(cd);
     if (!cd->tls_handshake_done) {
         /* Establish TLS connection */
         ret = wolfSSL_accept(cd->ssl);
@@ -1236,8 +1302,9 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             }
             if (wolfSSL_ALPN_GetProtocol(cd->ssl, &proto, &proto_len) &&
                     (2 == proto_len) && strncmp(proto, "h2", 2) == 0) {
-                nghttp2_settings_entry iv[1] = {
-                    {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100}
+                nghttp2_settings_entry iv[2] = {
+                    {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100},
+                    {NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, H2_MAX_HEADER_LIST_SIZE}
                 };
 
                 nghttp2_session_callbacks *h2_cbs;
@@ -1251,7 +1318,7 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
                 nghttp2_session_server_new(&cd->h2_session, h2_cbs, cd);
                 nghttp2_session_callbacks_del(h2_cbs);
                 cd->h2 = 1;
-                nghttp2_submit_settings(cd->h2_session, NGHTTP2_FLAG_NONE, iv, 1);
+                nghttp2_submit_settings(cd->h2_session, NGHTTP2_FLAG_NONE, iv, 2);
             }
             cd->tls_handshake_done = 1;
         }
@@ -1384,6 +1451,9 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
 
     /* Insert into hash table - O(1) */
     client_hash_insert(cd);
+
+    /* Arm the connection idle timeout */
+    client_arm_idle_timer(cd);
 
     DOH_Stats.mem += sizeof(struct client_data);
     DOH_Stats.clients++;
