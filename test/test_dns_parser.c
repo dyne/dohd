@@ -57,66 +57,62 @@ struct __attribute__((packed)) dns_header {
 
 /* Skip a DNS question section entry */
 static int dns_skip_question(uint8_t **record, int maxlen) {
-    int len = 0;
-    uint8_t *r = *record;
-    
-    while (*r != 0) {
-        if (*r > 63) {
-            /* Compression pointer - 2 bytes */
-            len += 2;
+    uint8_t *start = *record;
+    uint8_t *r = start;
+    const uint8_t *end = start + (size_t)maxlen;
+
+    while (r < end) {
+        uint8_t c = *r;
+        if ((c & 0xC0) == 0xC0) {
+            if ((size_t)(end - r) < 2)
+                return -1;
             r += 2;
             break;
         }
-        len += *r + 1;
-        r += *r + 1;
-        if (len > maxlen)
+        if (c == 0) {
+            r++;
+            break;
+        }
+        if (c > 63 || (size_t)(end - r) < (size_t)c + 1)
             return -1;
+        r += c + 1;
     }
-    if (*r == 0) {
-        len++;
-        r++;
-    }
-    /* Skip QTYPE and QCLASS (4 bytes) */
-    len += 4;
-    r += 4;
-    
-    if (len > maxlen)
+    if ((size_t)(end - r) < 4)
         return -1;
-    
+    r += 4;
     *record = r;
-    return len;
+    return (int)(r - start);
 }
 
 /* Skip RR name (handles compression) */
-static int dns_skip_rr_name(uint8_t **record, size_t *len) {
+static int dns_skip_rr_name(uint8_t **record, const uint8_t *end) {
     uint8_t *r = *record;
-    size_t consumed = 0;
-    
-    while (*r != 0) {
-        if (*r >= 0xC0) {
-            /* Compression pointer */
-            consumed += 2;
+
+    while (r < end) {
+        uint8_t c = *r;
+        if ((c & 0xC0) == 0xC0) {
+            if ((size_t)(end - r) < 2)
+                return -1;
             r += 2;
             *record = r;
-            *len -= consumed;
             return 0;
         }
-        consumed += *r + 1;
-        r += *r + 1;
-        if (consumed > *len)
+        if (c == 0) {
+            r++;
+            *record = r;
+            return 0;
+        }
+        if (c > 63 || (size_t)(end - r) < (size_t)c + 1)
             return -1;
+        r += c + 1;
     }
-    /* Skip null terminator */
-    consumed++;
-    r++;
-    *record = r;
-    *len -= consumed;
-    return 0;
+    return -1;
 }
 
 /* Extract minimum TTL from DNS response */
 static uint32_t dnsreply_min_age(const void *p, size_t len) {
     struct dns_header *hdr = (struct dns_header *)p;
+    const uint8_t *end = (const uint8_t *)p + len;
     uint8_t *record;
     uint32_t min_ttl = 0xFFFFFFFF;
     uint16_t qdcount, ancount, nscount, arcount;
@@ -136,31 +132,34 @@ static uint32_t dnsreply_min_age(const void *p, size_t len) {
 
     /* Skip questions */
     for (i = 0; i < qdcount; i++) {
-        if (dns_skip_question(&record, len) < 0)
+        if (dns_skip_question(&record, (int)(end - record)) < 0)
             return 0;
     }
 
     /* Process answer, authority, and additional sections */
     int total_rr = ancount + nscount + arcount;
-    for (i = 0; i < total_rr && len > 10; i++) {
+    for (i = 0; i < total_rr; i++) {
         uint32_t ttl;
         uint16_t datalen;
+        size_t remain;
 
-        if (dns_skip_rr_name(&record, &len) < 0)
+        if (dns_skip_rr_name(&record, end) < 0)
             return min_ttl;
 
-        if (len < 10)
+        remain = (size_t)(end - record);
+        if (remain < 10)
             return min_ttl;
 
         /* TYPE (2) + CLASS (2) + TTL (4) + RDLENGTH (2) = 10 bytes */
         ttl = ntohl(*(uint32_t *)(record + 4));
         datalen = ntohs(*(uint16_t *)(record + 8));
 
+        if (remain < (size_t)(10 + datalen))
+            return min_ttl;
         if (ttl < min_ttl && ttl > 0)
             min_ttl = ttl;
 
         record += 10 + datalen;
-        len -= 10 + datalen;
     }
 
     return (min_ttl == 0xFFFFFFFF) ? 0 : min_ttl;
@@ -291,6 +290,40 @@ static int test_dns_truncated(void) {
     return 1;
 }
 
+static int test_dns_truncated_question_regression(void) {
+    uint8_t response[] = {
+        0x12, 0x34,
+        0x81, 0x80,
+        0x00, 0x01,
+        0x00, 0x01,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x3f, 'a', 'a', 'a', 'a'
+    };
+
+    TEST_ASSERT(dnsreply_min_age(response, sizeof(response)) == 0,
+        "truncated question returns 0 without over-reading");
+    return 1;
+}
+
+static int test_dns_truncated_answer_regression(void) {
+    uint8_t response[] = {
+        0x12, 0x34,
+        0x81, 0x80,
+        0x00, 0x00,
+        0x00, 0x01,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x00,
+        0x00, 0x01,
+        0x00
+    };
+
+    TEST_ASSERT(dnsreply_min_age(response, sizeof(response)) == 0xFFFFFFFF,
+        "truncated answer returns sentinel without over-reading");
+    return 1;
+}
+
 /* Test: Empty response (no answers) */
 static int test_dns_no_answers(void) {
     uint8_t response[] = {
@@ -365,6 +398,8 @@ int main(int argc, char **argv) {
     test_dns_ttl_extraction();
     test_dns_multiple_ttls();
     test_dns_truncated();
+    test_dns_truncated_question_regression();
+    test_dns_truncated_answer_regression();
     test_dns_no_answers();
     test_dns_long_name();
     test_dns_compression();

@@ -307,7 +307,7 @@ static int build_plaintext(const uint8_t *dns, uint16_t dns_len,
 }
 
 static int parse_plaintext_dns(const uint8_t *plain, uint16_t plain_len,
-    uint8_t *dns_out, uint16_t *dns_out_len)
+    uint8_t *dns_out, uint16_t dns_out_cap, uint16_t *dns_out_len)
 {
     uint16_t dns_len;
     uint16_t pad_len;
@@ -322,6 +322,8 @@ static int parse_plaintext_dns(const uint8_t *plain, uint16_t plain_len,
 
     pad_len = be16(plain + 2 + dns_len);
     if ((size_t)(2 + dns_len + 2 + pad_len) > plain_len)
+        return -1;
+    if (dns_len > dns_out_cap)
         return -1;
 
     for (i = 0; i < pad_len; i++) {
@@ -520,11 +522,12 @@ int odoh_client_encrypt_query(const odoh_config *cfg,
 
 int odoh_target_decrypt_query(odoh_target_ctx *target,
     const uint8_t *in, uint16_t in_len,
-    uint8_t *dns_out, uint16_t *dns_out_len,
+    uint8_t *dns_out, uint16_t dns_out_cap, uint16_t *dns_out_len,
     odoh_req_ctx *req_ctx)
 {
 #if !ODOH_HAVE_HPKE_CONTEXT_API
-    (void)target; (void)in; (void)in_len; (void)dns_out; (void)dns_out_len; (void)req_ctx;
+    (void)target; (void)in; (void)in_len; (void)dns_out; (void)dns_out_cap;
+    (void)dns_out_len; (void)req_ctx;
     return -1;
 #else
     odoh_message_view msg;
@@ -561,6 +564,8 @@ int odoh_target_decrypt_query(odoh_target_ctx *target,
     enc = msg.encrypted;
     ct = msg.encrypted + enc_len;
     ct_len = (uint16_t)(msg.encrypted_len - enc_len);
+    if (ct_len < req_ctx->hpke.Nt)
+        return -1;
 
     if (odoh_hpke_init_open_context(&req_ctx->hpke, &req_ctx->hpke_ctx,
             &target->priv, enc, enc_len,
@@ -574,7 +579,8 @@ int odoh_target_decrypt_query(odoh_target_ctx *target,
             aad, aad_len, (byte *)ct, ct_len, plain) != 0)
         return -1;
 
-    if (parse_plaintext_dns(plain, (uint16_t)(ct_len - req_ctx->hpke.Nt), dns_out, dns_out_len) != 0)
+    if (parse_plaintext_dns(plain, (uint16_t)(ct_len - req_ctx->hpke.Nt),
+            dns_out, dns_out_cap, dns_out_len) != 0)
         return -1;
 
     memcpy(req_ctx->q_plain, plain, (size_t)(ct_len - req_ctx->hpke.Nt));
@@ -669,10 +675,11 @@ int odoh_target_encrypt_response(const odoh_req_ctx *req_ctx,
 
 int odoh_client_decrypt_response(odoh_client_ctx *client_ctx,
     const uint8_t *in, uint16_t in_len,
-    uint8_t *dns_out, uint16_t *dns_out_len)
+    uint8_t *dns_out, uint16_t dns_out_cap, uint16_t *dns_out_len)
 {
 #if !ODOH_HAVE_HPKE_CONTEXT_API
-    (void)client_ctx; (void)in; (void)in_len; (void)dns_out; (void)dns_out_len;
+    (void)client_ctx; (void)in; (void)in_len; (void)dns_out; (void)dns_out_cap;
+    (void)dns_out_len;
     return -1;
 #else
     odoh_message_view msg;
@@ -721,7 +728,7 @@ int odoh_client_decrypt_response(odoh_client_ctx *client_ctx,
             msg.encrypted + pt_len, client_ctx->hpke.Nt,
             aad, aad_len);
         if (ret == 0)
-            ret = parse_plaintext_dns(plain, pt_len, dns_out, dns_out_len);
+            ret = parse_plaintext_dns(plain, pt_len, dns_out, dns_out_cap, dns_out_len);
     }
     wc_AesFree(&aes);
 

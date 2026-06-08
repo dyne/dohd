@@ -16,17 +16,17 @@
 
 #define DECLARE_HEAP(type, orderby)                                                     \
 struct heap_element_##type {                                                            \
-    uint32_t id;                                                                        \
+    uint64_t id;                                                                        \
     type data;                                                                          \
 };                                                                                      \
 struct heap_##type {                                                                    \
     uint32_t size;                                                                      \
     uint32_t n;                                                                         \
-    uint32_t last_id;                                                                   \
+    uint64_t last_id;                                                                   \
     struct heap_element_##type *top;                                                    \
 };                                                                                      \
 typedef struct heap_##type heap_##type;                                                 \
-static inline int heap_insert(struct heap_##type *heap, type *el)                       \
+static inline uint64_t heap_insert(struct heap_##type *heap, type *el)                  \
 {                                                                                       \
     int i;                                                                              \
     struct heap_element_##type etmp;                                                    \
@@ -42,18 +42,16 @@ static inline int heap_insert(struct heap_##type *heap, type *el)               
         heap->size++;                                                                   \
     }                                                                                   \
     etmp.id = heap->last_id++;                                                          \
-    if ((heap->last_id & 0x80000000U) != 0)                                             \
-       heap->last_id = 0; /* Wrap around */                                             \
     if (heap->n == 1) {                                                                 \
         memcpy(&heap->top[1], &etmp, sizeof(struct heap_element_##type));               \
-        return (int)etmp.id;                                                            \
+        return etmp.id;                                                                 \
     }                                                                                   \
     for (i = heap->n; ((i > 1) &&                                                       \
                 (heap->top[i / 2].data.orderby > el->orderby)); i /= 2) {               \
         memcpy(&heap->top[i], &heap->top[i / 2], sizeof(struct heap_element_##type));   \
     }                                                                                   \
     memcpy(&heap->top[i], &etmp, sizeof(struct heap_element_##type));                   \
-    return (int)etmp.id;                                                                \
+    return etmp.id;                                                                     \
 } \
 static inline int heap_peek(struct heap_##type *heap, type *first)                      \
 {                                                                                       \
@@ -81,7 +79,7 @@ static inline int heap_peek(struct heap_##type *heap, type *first)              
     memcpy(&heap->top[i], last, sizeof(struct heap_element_##type));                    \
     return 0;                                                                           \
 } \
-static inline int heap_delete(struct heap_##type *heap, int id)                         \
+static inline int heap_delete(struct heap_##type *heap, uint64_t id)                    \
 {                                                                                       \
     int found = 0;                                                                      \
     int i;                                                                       \
@@ -136,4 +134,3 @@ static inline void heap_destroy(heap_##type *h)                                 
     free(h->top);                                                                       \
     free(h);                                                                            \
 }
-

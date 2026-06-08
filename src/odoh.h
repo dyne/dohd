@@ -64,11 +64,11 @@ int odoh_client_encrypt_query(const odoh_config *cfg,
 
 int odoh_client_decrypt_response(odoh_client_ctx *client_ctx,
     const uint8_t *in, uint16_t in_len,
-    uint8_t *dns_out, uint16_t *dns_out_len);
+    uint8_t *dns_out, uint16_t dns_out_cap, uint16_t *dns_out_len);
 
 int odoh_target_decrypt_query(odoh_target_ctx *target,
     const uint8_t *in, uint16_t in_len,
-    uint8_t *dns_out, uint16_t *dns_out_len,
+    uint8_t *dns_out, uint16_t dns_out_cap, uint16_t *dns_out_len,
     odoh_req_ctx *req_ctx);
 
 int odoh_target_encrypt_response(const odoh_req_ctx *req_ctx,
