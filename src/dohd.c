@@ -505,6 +505,17 @@ static void handle_pending_signals(int __attribute__((unused)) fd,
     }
 }
 
+static int set_fd_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+
+    if (flags < 0)
+        return -1;
+    if ((flags & O_NONBLOCK) != 0)
+        return 0;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 
 static void dohd_destroy_client(struct client_data *cd)
 {
@@ -1793,8 +1804,11 @@ int main(int argc, char *argv[])
         dohprint(DOH_ERR, "ERROR: failed to create signal pipe");
         return -1;
     }
-    fcntl(signal_pipe[0], F_SETFL, O_NONBLOCK);
-    fcntl(signal_pipe[1], F_SETFL, O_NONBLOCK);
+    if (set_fd_nonblocking(signal_pipe[0]) != 0 ||
+            set_fd_nonblocking(signal_pipe[1]) != 0) {
+        dohprint(DOH_ERR, "ERROR: failed to make signal pipe non-blocking");
+        return -1;
+    }
     evquick_addevent(signal_pipe[0], EVQUICK_EV_READ, handle_pending_signals, NULL, NULL);
 
     /* Initialize memory pools */

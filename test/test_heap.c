@@ -262,6 +262,20 @@ static int test_heap_id_wrap(void) {
     return 1;
 }
 
+static int test_heap_skips_error_sentinel(void) {
+    heap_test_timer *h = heap_init();
+    test_timer t = { .expire = 1, .value = 1 };
+    uint64_t id;
+
+    h->last_id = UINT64_MAX;
+    id = heap_insert(h, &t);
+    TEST_ASSERT(id == 0, "heap_insert skips UINT64_MAX sentinel");
+    TEST_ASSERT(h->last_id == 1, "heap_insert advances after sentinel wrap");
+
+    heap_destroy(h);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -279,6 +293,7 @@ int main(int argc, char **argv) {
     test_heap_stress();
     test_heap_growth();
     test_heap_id_wrap();
+    test_heap_skips_error_sentinel();
 
     fprintf(stderr, "\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
 

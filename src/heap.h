@@ -36,11 +36,13 @@ static inline uint64_t heap_insert(struct heap_##type *heap, type *el)          
                 (heap->n + 1) * sizeof(struct heap_element_##type));                    \
         if (!_tmp) {                                                                    \
             heap->n--;                                                                  \
-            return -1;                                                                  \
+            return UINT64_MAX;                                                          \
         }                                                                               \
         heap->top = _tmp;                                                               \
         heap->size++;                                                                   \
     }                                                                                   \
+    if (heap->last_id == UINT64_MAX)                                                    \
+        heap->last_id = 0;                                                              \
     etmp.id = heap->last_id++;                                                          \
     if (heap->n == 1) {                                                                 \
         memcpy(&heap->top[1], &etmp, sizeof(struct heap_element_##type));               \

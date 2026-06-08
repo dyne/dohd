@@ -508,6 +508,8 @@ static int tcp_connect(const char *host, const char *port)
     tv.tv_usec = 0;
 
     for (rp = res; rp; rp = rp->ai_next) {
+        if (!sockaddr_is_public(rp->ai_addr))
+            continue;
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0)
             continue;

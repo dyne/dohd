@@ -141,6 +141,8 @@ static uint32_t dnsreply_min_age(const void *p, size_t len) {
     for (i = 0; i < total_rr; i++) {
         uint32_t ttl;
         uint16_t datalen;
+        uint32_t ttl_net;
+        uint16_t datalen_net;
         size_t remain;
 
         if (dns_skip_rr_name(&record, end) < 0)
@@ -151,8 +153,10 @@ static uint32_t dnsreply_min_age(const void *p, size_t len) {
             return min_ttl;
 
         /* TYPE (2) + CLASS (2) + TTL (4) + RDLENGTH (2) = 10 bytes */
-        ttl = ntohl(*(uint32_t *)(record + 4));
-        datalen = ntohs(*(uint16_t *)(record + 8));
+        memcpy(&ttl_net, record + 4, sizeof(ttl_net));
+        memcpy(&datalen_net, record + 8, sizeof(datalen_net));
+        ttl = ntohl(ttl_net);
+        datalen = ntohs(datalen_net);
 
         if (remain < (size_t)(10 + datalen))
             return min_ttl;

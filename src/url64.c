@@ -19,6 +19,7 @@
  */
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stddef.h>
 
 static const unsigned char asciitable[256] = {
@@ -43,11 +44,16 @@ static const unsigned char asciitable[256] = {
 // returns an estimation of the length of the data once decoded
 int dohd_url64_declen(int len) { return ((len + 3) >> 2) * 3; }
 
+static size_t dohd_url64_declen_size(size_t len)
+{
+    return ((len + 3U) >> 2) * 3U;
+}
+
 int dohd_url64_check(const char *in, size_t in_len) {
     size_t c;
     const unsigned char *bufin;
 
-    if (!in)
+    if (!in || in_len > (size_t)INT_MAX)
         return 0;
     bufin = (const unsigned char *)in;
     for (c = 0; c < in_len; c++) {
@@ -66,9 +72,11 @@ int dohd_url64_decode(const char *src, size_t src_len, uint8_t *dest, size_t des
 
     if (!src || !dest || dest_cap == 0)
         return -1;
+    if (src_len > (size_t)INT_MAX)
+        return -1;
     if (dohd_url64_check(src, src_len) != (int)src_len)
         return -1;
-    if ((size_t)dohd_url64_declen((int)src_len) + 1 > dest_cap)
+    if (dohd_url64_declen_size(src_len) + 1 > dest_cap)
         return -1;
 
     bufin = _buf;
