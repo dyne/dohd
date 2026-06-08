@@ -85,6 +85,7 @@ enum req_type {
 struct target_conn {
     struct upstream up;
     int fd;
+    int require_public_target;
     WOLFSSL *ssl;
     nghttp2_session *session;
     struct forward_ctx *active_fx;
@@ -489,7 +490,7 @@ static int parse_target_from_path(const uint8_t *value, size_t len,
     return 0;
 }
 
-static int tcp_connect(const char *host, const char *port)
+static int tcp_connect(const char *host, const char *port, int require_public_target)
 {
     struct addrinfo hints, *res = NULL, *rp;
     int fd = -1;
@@ -508,7 +509,7 @@ static int tcp_connect(const char *host, const char *port)
     tv.tv_usec = 0;
 
     for (rp = res; rp; rp = rp->ai_next) {
-        if (!sockaddr_is_public(rp->ai_addr))
+        if (require_public_target && !sockaddr_is_public(rp->ai_addr))
             continue;
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0)
@@ -676,7 +677,7 @@ static int connect_target_connection(struct target_conn *tc)
         return 0;
 
     close_target_connection(tc);
-    tc->fd = tcp_connect(tc->up.host, tc->up.port);
+    tc->fd = tcp_connect(tc->up.host, tc->up.port, tc->require_public_target);
     if (tc->fd < 0)
         return -1;
 
@@ -829,6 +830,7 @@ static int forward_to_dynamic_target(struct req *req, uint8_t *out, uint32_t *ou
     if (!target_is_allowed(tc.up.host, tc.up.port, tc.up.path))
         return -1;
     tc.fd = -1;
+    tc.require_public_target = 1;
 
     if (forward_to_upstream(&tc, req, "application/oblivious-dns-message", out, out_len) != 0) {
         close_target_connection(&tc);
