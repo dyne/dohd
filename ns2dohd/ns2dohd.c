@@ -1346,7 +1346,11 @@ int main(int argc, char *argv[])
                 goto odoh_fail;
             }
             if (odoh_client_decrypt_response(&odoh_client, odoh_rep, (uint16_t)reply_len,
-                    dns_rep, &dns_out_len) != 0) {
+                    dns_rep, sizeof(dns_rep), &dns_out_len) != 0) {
+                stats.errors++;
+                goto odoh_fail;
+            }
+            if (dns_out_len > sizeof(dns_rep)) {
                 stats.errors++;
                 goto odoh_fail;
             }

@@ -87,8 +87,8 @@ static int test_heap_single_insert(void) {
     test_timer t = { .expire = 100, .value = 42 };
     test_timer out;
 
-    int id = heap_insert(h, &t);
-    TEST_ASSERT(id >= 0, "heap_insert returns valid id");
+    uint64_t id = heap_insert(h, &t);
+    TEST_ASSERT(id != UINT64_MAX, "heap_insert returns valid id");
     TEST_ASSERT(h->n == 1, "heap has 1 element after insert");
 
     test_timer *first = heap_first(h);
@@ -139,12 +139,12 @@ static int test_heap_ordering(void) {
 /* Test heap delete by id */
 static int test_heap_delete(void) {
     heap_test_timer *h = heap_init();
-    test_timer t, out;
-    int id1, id2, id3;
+    test_timer t;
+    uint64_t id2;
 
-    t.expire = 100; t.value = 1; id1 = heap_insert(h, &t);
+    t.expire = 100; t.value = 1; heap_insert(h, &t);
     t.expire = 200; t.value = 2; id2 = heap_insert(h, &t);
-    t.expire = 300; t.value = 3; id3 = heap_insert(h, &t);
+    t.expire = 300; t.value = 3; heap_insert(h, &t);
 
     TEST_ASSERT(h->n == 3, "heap has 3 elements");
 
@@ -227,8 +227,8 @@ static int test_heap_growth(void) {
     for (i = 0; i < 100; i++) {
         t.expire = i;
         t.value = i;
-        int id = heap_insert(h, &t);
-        TEST_ASSERT(id >= 0, "insert during growth succeeds");
+        uint64_t id = heap_insert(h, &t);
+        TEST_ASSERT(id != UINT64_MAX, "insert during growth succeeds");
     }
     TEST_ASSERT(h->n == 100, "heap has 100 elements");
     TEST_ASSERT(h->size >= 100, "heap size grew appropriately");
@@ -243,7 +243,7 @@ static int test_heap_id_wrap(void) {
     test_timer t, out;
 
     /* Force id near wraparound point */
-    h->last_id = 0x7FFFFFF0;
+    h->last_id = 0xFFFFFFFFFFFFFFF0ULL;
 
     for (int i = 0; i < 20; i++) {
         t.expire = i;
@@ -257,6 +257,20 @@ static int test_heap_id_wrap(void) {
         int ret = heap_peek(h, &out);
         TEST_ASSERT(ret == 0, "peek succeeds after id wrap");
     }
+
+    heap_destroy(h);
+    return 1;
+}
+
+static int test_heap_skips_error_sentinel(void) {
+    heap_test_timer *h = heap_init();
+    test_timer t = { .expire = 1, .value = 1 };
+    uint64_t id;
+
+    h->last_id = UINT64_MAX;
+    id = heap_insert(h, &t);
+    TEST_ASSERT(id == 0, "heap_insert skips UINT64_MAX sentinel");
+    TEST_ASSERT(h->last_id == 1, "heap_insert advances after sentinel wrap");
 
     heap_destroy(h);
     return 1;
@@ -279,6 +293,7 @@ int main(int argc, char **argv) {
     test_heap_stress();
     test_heap_growth();
     test_heap_id_wrap();
+    test_heap_skips_error_sentinel();
 
     fprintf(stderr, "\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
 

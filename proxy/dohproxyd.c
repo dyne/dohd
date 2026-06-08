@@ -85,6 +85,7 @@ enum req_type {
 struct target_conn {
     struct upstream up;
     int fd;
+    int require_public_target;
     WOLFSSL *ssl;
     nghttp2_session *session;
     struct forward_ctx *active_fx;
@@ -99,6 +100,95 @@ struct client {
     struct req req;
     struct client *next;
 };
+
+static int target_host_has_forbidden_syntax(const char *host)
+{
+    struct in_addr a4;
+    struct in6_addr a6;
+    size_t i;
+
+    if (!host || *host == '\0')
+        return 1;
+    if (strchr(host, '@') || strchr(host, '/') || strchr(host, '\\') ||
+            strchr(host, '?') || strchr(host, '#') || strchr(host, '%'))
+        return 1;
+    for (i = 0; host[i] != '\0'; i++) {
+        if (isspace((unsigned char)host[i]))
+            return 1;
+    }
+    if (strchr(host, ':') != NULL)
+        return inet_pton(AF_INET6, host, &a6) != 1;
+    if (inet_pton(AF_INET, host, &a4) == 1)
+        return 0;
+    for (i = 0; host[i] != '\0'; i++) {
+        unsigned char ch = (unsigned char)host[i];
+        if (!(isalnum(ch) || ch == '.' || ch == '-'))
+            return 1;
+    }
+    return 0;
+}
+
+static int sockaddr_is_public(const struct sockaddr *sa)
+{
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)sa;
+        uint32_t ip = ntohl(sin->sin_addr.s_addr);
+
+        if ((ip >> 24) == 10 || (ip >> 24) == 127 || (ip >> 24) == 0)
+            return 0;
+        if ((ip & 0xFFF00000U) == 0xAC100000U)
+            return 0;
+        if ((ip & 0xFFFF0000U) == 0xC0A80000U)
+            return 0;
+        if ((ip & 0xFFFF0000U) == 0xA9FE0000U)
+            return 0;
+        if ((ip & 0xF0000000U) == 0xE0000000U)
+            return 0;
+        return 1;
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sa;
+        const uint8_t *ip = sin6->sin6_addr.s6_addr;
+
+        if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr) ||
+                IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr) ||
+                IN6_IS_ADDR_MULTICAST(&sin6->sin6_addr))
+            return 0;
+        if ((ip[0] & 0xFE) == 0xFC)
+            return 0;
+        if (ip[0] == 0xFE && (ip[1] & 0xC0) == 0x80)
+            return 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int target_is_allowed(const char *host, const char *port, const char *path)
+{
+    struct addrinfo hints, *res = NULL, *rp;
+    int allowed = 0;
+
+    if (!path || path[0] != '/' || target_host_has_forbidden_syntax(host))
+        return 0;
+    if (strcmp(port, "443") != 0)
+        return 0;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port, &hints, &res) != 0)
+        return 0;
+
+    allowed = 1;
+    for (rp = res; rp; rp = rp->ai_next) {
+        if (!sockaddr_is_public(rp->ai_addr)) {
+            allowed = 0;
+            break;
+        }
+    }
+    freeaddrinfo(res);
+    return allowed;
+}
 
 static int lfd = -1;
 static WOLFSSL_CTX *srv_ctx = NULL;
@@ -400,7 +490,7 @@ static int parse_target_from_path(const uint8_t *value, size_t len,
     return 0;
 }
 
-static int tcp_connect(const char *host, const char *port)
+static int tcp_connect(const char *host, const char *port, int require_public_target)
 {
     struct addrinfo hints, *res = NULL, *rp;
     int fd = -1;
@@ -419,6 +509,8 @@ static int tcp_connect(const char *host, const char *port)
     tv.tv_usec = 0;
 
     for (rp = res; rp; rp = rp->ai_next) {
+        if (require_public_target && !sockaddr_is_public(rp->ai_addr))
+            continue;
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0)
             continue;
@@ -585,7 +677,7 @@ static int connect_target_connection(struct target_conn *tc)
         return 0;
 
     close_target_connection(tc);
-    tc->fd = tcp_connect(tc->up.host, tc->up.port);
+    tc->fd = tcp_connect(tc->up.host, tc->up.port, tc->require_public_target);
     if (tc->fd < 0)
         return -1;
 
@@ -735,7 +827,10 @@ static int forward_to_dynamic_target(struct req *req, uint8_t *out, uint32_t *ou
         return -1;
     if (parse_url(full, &tc.up) != 0)
         return -1;
+    if (!target_is_allowed(tc.up.host, tc.up.port, tc.up.path))
+        return -1;
     tc.fd = -1;
+    tc.require_public_target = 1;
 
     if (forward_to_upstream(&tc, req, "application/oblivious-dns-message", out, out_len) != 0) {
         close_target_connection(&tc);
@@ -821,6 +916,11 @@ static int in_header_cb(nghttp2_session *session,
     if (frame->hd.type != NGHTTP2_HEADERS || frame->headers.cat != NGHTTP2_HCAT_REQUEST)
         return 0;
 
+    if (req->stream_id != 0 && frame->hd.stream_id != (int32_t)req->stream_id) {
+        nghttp2_submit_rst_stream(session, NGHTTP2_FLAG_NONE,
+            frame->hd.stream_id, NGHTTP2_REFUSED_STREAM);
+        return 0;
+    }
     if (frame->hd.stream_id != (int32_t)req->stream_id)
         req->stream_id = frame->hd.stream_id;
 
@@ -944,18 +1044,21 @@ static int in_frame_recv_cb(nghttp2_session *session,
     }
 
     nghttp2_session_send(session);
-    free(req->resp);
-    memset(req, 0, sizeof(*req));
     return 0;
 }
 
 static int in_stream_close_cb(nghttp2_session *session, int32_t stream_id,
     uint32_t error_code, void *user_data)
 {
+    struct client *cl = (struct client *)user_data;
+    struct req *req = cl ? &cl->req : NULL;
+
     (void)session;
-    (void)stream_id;
     (void)error_code;
-    (void)user_data;
+    if (req && req->stream_id == (uint32_t)stream_id) {
+        free(req->resp);
+        memset(req, 0, sizeof(*req));
+    }
     return 0;
 }
 
@@ -982,7 +1085,7 @@ static void client_read(int fd, short revents, void *arg)
         }
 
         nghttp2_session_callbacks *cbs = NULL;
-        nghttp2_settings_entry iv[1] = {{ NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 }};
+        nghttp2_settings_entry iv[1] = {{ NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 1 }};
 
         if (nghttp2_session_callbacks_new(&cbs) != 0) {
             free_client(cl);

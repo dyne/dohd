@@ -61,7 +61,7 @@ struct evquick_event
 struct evquick_timer
 {
     unsigned long long interval;
-    int id;
+    uint64_t id;
     short flags;
 #ifdef EVQUICK_PTHREAD
     void (*callback)(CTX ctx, void *arg);
@@ -74,7 +74,7 @@ struct evquick_timer
 struct evquick_timer_instance
 {
     unsigned long long expire;
-    int id;
+    uint64_t id;
     struct evquick_timer *ev_timer;
 };
 typedef struct evquick_timer_instance evquick_timer_instance;

@@ -73,6 +73,21 @@
 /* DNS request timeout in milliseconds */
 #define DNS_REQUEST_TIMEOUT_MS 5000
 
+/* Maximum time (ms) a single HTTP/2 stream may stay open before its request is
+ * completed and forwarded upstream. Reaps half-open/stalled streams that open
+ * HEADERS but never send END_STREAM, bounding occupancy of the request pool. */
+#define H2_STREAM_TIMEOUT_MS 10000
+
+/* Connection idle timeout (ms). A client connection with no read activity for
+ * this long is closed, reaping slow-loris / flow-control-stalled connections
+ * that would otherwise hold client and request pool slots open. */
+#define CLIENT_IDLE_TIMEOUT_MS 30000
+
+/* Maximum decoded request header list size advertised to peers via
+ * SETTINGS_MAX_HEADER_LIST_SIZE. DoH requests carry only a handful of small
+ * headers; this caps HPACK-expanded header sets and is enforced by nghttp2. */
+#define H2_MAX_HEADER_LIST_SIZE (8 * 1024)
+
 #define IP6_LOCALHOST { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }
 #define DOHD_REQ_MIN 20
 #define STR_HTTP2_PREFACE "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -265,6 +280,10 @@ static char *authorized_proxy_dir = NULL;
 static char *resolved_proxy_dir = NULL;
 static odoh_target_ctx odoh_target = {};
 static proxy_auth_set proxy_set = {};
+static int signal_pipe[2] = { -1, -1 };
+static volatile sig_atomic_t reload_proxy_auth_pending = 0;
+static volatile sig_atomic_t reload_odoh_target_pending = 0;
+static volatile sig_atomic_t print_stats_pending = 0;
 #ifndef _MUSL_
 void *sigset(int sig, void (*disp)(int));
 #endif
@@ -297,6 +316,7 @@ struct client_data {
     int h2;
     nghttp2_session *h2_session;
     int doh_sd;
+    evquick_timer *idle_timer;       /* Connection idle timeout timer */
     struct client_data *next;
     struct req_slot *list;
 };
@@ -304,6 +324,7 @@ struct client_data {
 static void dohd_reply(int fd, short __attribute__((unused)) revents,
         void *arg);
 static void dohd_destroy_request(struct req_slot *req);
+static void dns_request_timeout(void *arg);
 
 /* Memory pools for client_data and req_slot */
 static mempool_t *client_pool = NULL;
@@ -436,13 +457,63 @@ static int reload_odoh_target(void)
     return 0;
 }
 
+static void notify_signal_pipe(void)
+{
+    char marker = 's';
+
+    if (signal_pipe[1] >= 0) {
+        if (write(signal_pipe[1], &marker, 1) < 0) {
+            /* best-effort wakeup */
+        }
+    }
+}
+
 static void sig_stats(int __attribute__((unused)) signo)
 {
     if (oblivion_mode) {
-        reload_proxy_authorization();
-        reload_odoh_target();
+        reload_proxy_auth_pending = 1;
+        reload_odoh_target_pending = 1;
     }
-    printstats();
+    print_stats_pending = 1;
+    notify_signal_pipe();
+}
+
+static void handle_pending_signals(int __attribute__((unused)) fd,
+        short __attribute__((unused)) revents,
+        void __attribute__((unused)) *arg)
+{
+    char drain[32];
+
+    if (signal_pipe[0] >= 0) {
+        while (read(signal_pipe[0], drain, sizeof(drain)) > 0) {
+        }
+    }
+
+    if (reload_proxy_auth_pending) {
+        reload_proxy_auth_pending = 0;
+        if (reload_proxy_authorization() != 0)
+            dohprint(DOH_WARN, "Failed to reload authorized proxies");
+    }
+    if (reload_odoh_target_pending) {
+        reload_odoh_target_pending = 0;
+        if (reload_odoh_target() != 0)
+            dohprint(DOH_WARN, "Failed to reload ODoH target");
+    }
+    if (print_stats_pending) {
+        print_stats_pending = 0;
+        printstats();
+    }
+}
+
+static int set_fd_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+
+    if (flags < 0)
+        return -1;
+    if ((flags & O_NONBLOCK) != 0)
+        return 0;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 
@@ -485,6 +556,12 @@ static void dohd_destroy_client(struct client_data *cd)
             DOH_Stats.pending_requests--;
         rp = nxt;
     }
+    /* Cancel idle timeout timer if pending */
+    if (cd->idle_timer) {
+        evquick_deltimer(cd->idle_timer);
+        cd->idle_timer = NULL;
+    }
+
     /* Remove events from file desc */
     if (cd->ev_doh) {
         evquick_delevent(cd->ev_doh);
@@ -512,6 +589,33 @@ static void dohd_destroy_client(struct client_data *cd)
     check_stats();
 }
 
+/* Connection idle timeout - no read activity for CLIENT_IDLE_TIMEOUT_MS.
+ * Reaps slow-loris / flow-control-stalled connections that hold pool slots. */
+static void client_idle_timeout(void *arg)
+{
+    struct client_data *cd = (struct client_data *)arg;
+    /* One-shot timer has fired; clear stored pointer before destroying so
+     * dohd_destroy_client() does not attempt to cancel an already-freed timer. */
+    cd->idle_timer = NULL;
+    if (!client_hash_exists(cd))
+        return;
+    dohprint(DOH_DEBUG, "Closing idle client connection");
+    DOH_Stats.socket_errors++;
+    dohd_destroy_client(cd);
+}
+
+/* (Re)arm the per-connection idle timeout. Called at connection setup and on
+ * every read with activity, so the timer measures time since last activity. */
+static void client_arm_idle_timer(struct client_data *cd)
+{
+    if (cd->idle_timer) {
+        evquick_deltimer(cd->idle_timer);
+        cd->idle_timer = NULL;
+    }
+    cd->idle_timer = evquick_addtimer(CLIENT_IDLE_TIMEOUT_MS, 0,
+            client_idle_timeout, cd);
+}
+
 static void clean_exit(int __attribute__((unused)) signo)
 {
     /* Iterate hash table and destroy all clients */
@@ -535,6 +639,8 @@ static void clean_exit(int __attribute__((unused)) signo)
                 mempool_free(request_pool, rp);
                 rp = nxt;
             }
+            if (cd->idle_timer)
+                evquick_deltimer(cd->idle_timer);
             if (cd->ev_doh)
                 evquick_delevent(cd->ev_doh);
             if (cd->ssl)
@@ -554,6 +660,10 @@ static void clean_exit(int __attribute__((unused)) signo)
     odoh_target_free(&odoh_target);
     free(resolved_proxy_dir);
     resolved_proxy_dir = NULL;
+    if (signal_pipe[0] >= 0)
+        close(signal_pipe[0]);
+    if (signal_pipe[1] >= 0)
+        close(signal_pipe[1]);
 
     fprintf(stderr, "Cleanup, exiting...\n");
 #ifdef DMALLOC
@@ -578,13 +688,14 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     req = nghttp2_session_get_stream_user_data(cd->h2_session, stream_id);
     if (req) {
         dohprint(DOH_WARN, "W: request is not null for this stream id\n");
-
+        return req;
     }
     req = mempool_alloc(request_pool);
     if (req == NULL) {
         dohprint(DOH_ERR, "Request pool exhausted (capacity: %u)", MAX_REQUESTS);
         return req;
     }
+    memset(req, 0, sizeof(*req));
     req->resolver = next_resolver();
     req->resolver_sz = sizeof(struct sockaddr_in);
     /* Change AF / socksize if IPV6 */
@@ -620,11 +731,19 @@ struct req_slot *dns_create_request_h2(struct client_data *cd, uint32_t stream_i
     req->owner_fd = cd->doh_sd;
     req->h2_stream_id = stream_id;
     req->timeout_timer = NULL;
+    req->ev_dns = NULL;
     req->is_odoh = 0;
     req->content_type_seen = 0;
     req->is_h2_get = 0;
     memset(&req->odoh_ctx, 0, sizeof(req->odoh_ctx));
     nghttp2_session_set_stream_user_data(cd->h2_session, stream_id, req);
+
+    /* Arm a stream timeout to reap half-open streams that never complete their
+     * request (no END_STREAM). This is re-armed with the upstream timeout once
+     * the request is actually forwarded in dns_send_request_h2(). */
+    req->timeout_timer = evquick_addtimer(H2_STREAM_TIMEOUT_MS, 0,
+            dns_request_timeout, req);
+
     return req;
 }
 
@@ -671,7 +790,7 @@ static int dns_send_request_h2(struct req_slot *req)
             return -1;
         if (odoh_target_decrypt_query(&odoh_target,
                 req->h2_request_buffer, (uint16_t)req->h2_request_len,
-                plain_dns, &plain_len, &req->odoh_ctx) != 0) {
+                plain_dns, sizeof(plain_dns), &plain_len, &req->odoh_ctx) != 0) {
             return -1;
         }
         if (plain_len > sizeof(req->h2_request_buffer))
@@ -703,7 +822,12 @@ static int dns_send_request_h2(struct req_slot *req)
         return -1;
     }
 
-    /* Start timeout timer - if upstream doesn't respond, return 504 */
+    /* Cancel the stream-open timeout armed at request creation, then start the
+     * upstream timeout - if upstream doesn't respond, return 504 */
+    if (req->timeout_timer) {
+        evquick_deltimer(req->timeout_timer);
+        req->timeout_timer = NULL;
+    }
     req->timeout_timer = evquick_addtimer(DNS_REQUEST_TIMEOUT_MS, 0,
             dns_request_timeout, req);
 
@@ -726,71 +850,54 @@ static ssize_t client_ssl_write(struct client_data *cd, const void *data, size_t
  */
 static int dns_skip_question(uint8_t **record, int maxlen)
 {
-    int skip = 0;
-    size_t len = (size_t)maxlen;
-    uint8_t *cur = *record;
-    int consumed = 0;
-    while (len > 0) {
+    uint8_t *start = *record;
+    uint8_t *cur = start;
+    const uint8_t *buf_end = start + (size_t)maxlen;
+
+    while (cur < buf_end) {
         uint8_t c = *cur;
         if ((c & 0xC0) == 0xC0) {
-            if (len < 2)
+            if ((size_t)(buf_end - cur) < 2)
                 return -1;
             cur += 2;
-            consumed += 2;
-            len -= 2;
             break;
         }
         if (c == 0) {
             cur += 1;
-            consumed += 1;
-            len -= 1;
             break;
         }
-        if (c > 63 || len < (size_t)c + 1)
+        if (c > 63 || (size_t)(buf_end - cur) < (size_t)c + 1)
             return -1;
         cur += c + 1;
-        consumed += c + 1;
-        len -= c + 1;
     }
-    if (len < DNSQ_SUFFIX_LEN)
+    if ((size_t)(buf_end - cur) < DNSQ_SUFFIX_LEN)
         return -1;
     cur += DNSQ_SUFFIX_LEN;
-    consumed += DNSQ_SUFFIX_LEN;
     *record = cur;
-    skip = consumed;
-    return skip;
+    return (int)(cur - start);
 }
 
-static int dns_skip_rr_name(uint8_t **record, size_t *len)
+static int dns_skip_rr_name(uint8_t **record, const uint8_t *buf_end)
 {
     uint8_t *cur = *record;
-    size_t remain = *len;
-    int consumed = 0;
-    while (remain > 0) {
+
+    while (cur < buf_end) {
         uint8_t c = *cur;
         if ((c & 0xC0) == 0xC0) {
-            if (remain < 2)
+            if ((size_t)(buf_end - cur) < 2)
                 return -1;
             cur += 2;
-            consumed += 2;
-            remain -= 2;
             *record = cur;
-            *len = remain;
-            return consumed;
+            return 2;
         }
         if (c == 0) {
             cur += 1;
-            consumed += 1;
-            remain -= 1;
             *record = cur;
-            *len = remain;
-            return consumed;
+            return 1;
         }
-        if (c > 63 || remain < (size_t)c + 1)
+        if (c > 63 || (size_t)(buf_end - cur) < (size_t)c + 1)
             return -1;
         cur += c + 1;
-        consumed += c + 1;
-        remain -= c + 1;
     }
     return -1;
 }
@@ -799,26 +906,38 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
 {
     int i = 0;
     const struct dns_header *hdr = p;
-    uint8_t *record = ((uint8_t *)p + sizeof(struct dns_header));
-    int skip = 0;
-    int answers = ntohs(hdr->ancount) + ntohs(hdr->nscount) + ntohs(hdr->arcount);
+    const uint8_t *buf = p;
+    const uint8_t *buf_end;
+    uint8_t *record;
+    int answers;
     uint32_t min_ttl = 3600;
+
+    if (len < sizeof(struct dns_header))
+        return min_ttl;
+
+    record = (uint8_t *)buf + sizeof(struct dns_header);
+    buf_end = buf + len;
+    answers = ntohs(hdr->ancount) + ntohs(hdr->nscount) + ntohs(hdr->arcount);
     if (answers < 1)
         return -1;
 
     for (i = 0; i < ntohs(hdr->qdcount); i++) {
-        skip = dns_skip_question(&record, len);
-        if (skip < DNSQ_SUFFIX_LEN) {
+        if (record > buf_end)
             return min_ttl;
-        }
-        len -= skip;
+        if (dns_skip_question(&record, (int)(buf_end - record)) < DNSQ_SUFFIX_LEN)
+            return min_ttl;
     }
     for (i = 0; i < answers; i++) {
         uint32_t ttl;
         uint32_t datalen;
-        if (dns_skip_rr_name(&record, &len) < 0)
+        size_t remain;
+
+        if (record > buf_end)
             return min_ttl;
-        if (len < 10)
+        if (dns_skip_rr_name(&record, buf_end) < 0)
+            return min_ttl;
+        remain = (size_t)(buf_end - record);
+        if (remain < 10)
             return min_ttl;
         ttl =       (record[4] << 24 ) +
             (record[5] << 16 ) +
@@ -826,17 +945,30 @@ static uint32_t dnsreply_min_age(const void *p, size_t len)
             record[7];
         datalen   = (record[8] << 8) +
             record[9];
-        if (len < (10U + datalen))
+        if (remain < (10U + datalen))
             return min_ttl;
         if (ttl && (ttl < min_ttl))
             min_ttl = ttl;
         record += 10 + datalen;
-        len -= 10 + datalen;
     }
     return min_ttl;
 }
 
 #define DOHD_MAX_REPLY (DNS_BUFFER_MAXSIZE)
+
+static void dns_request_finish_upstream(struct req_slot *req)
+{
+    if (!req)
+        return;
+    if (req->ev_dns) {
+        evquick_delevent(req->ev_dns);
+        req->ev_dns = NULL;
+    }
+    if (req->dns_sd >= 0) {
+        close(req->dns_sd);
+        req->dns_sd = -1;
+    }
+}
 
 static void dohd_destroy_request(struct req_slot *req)
 {
@@ -868,18 +1000,16 @@ static void dohd_destroy_request(struct req_slot *req)
         evquick_deltimer(req->timeout_timer);
         req->timeout_timer = NULL;
     }
-    if (req->ev_dns) {
-        evquick_delevent(req->ev_dns);
-        req->ev_dns = NULL;
-    }
-    close(req->dns_sd);
+    dns_request_finish_upstream(req);
     if (req->h2_response_data) {
         DOH_Stats.mem -= req->h2_response_len;
         free(req->h2_response_data);
         req->h2_response_data = NULL;
     }
 
-    if (client_valid && cd->h2_session && req->h2_stream_id) {
+    if (client_valid && cd->h2_session && req->h2_stream_id &&
+            nghttp2_session_get_stream_user_data(cd->h2_session,
+                req->h2_stream_id) == req) {
         nghttp2_session_set_stream_user_data(cd->h2_session,
                 req->h2_stream_id, NULL);
     }
@@ -993,6 +1123,7 @@ static void dohd_reply(int fd, short __attribute__((unused)) revents,
         DOH_Stats.mem += resp_len;
         memcpy(req->h2_response_data, resp_ptr, resp_len);
         req->h2_response_len = resp_len;
+        dns_request_finish_upstream(req);
         memset(&data_prd, 0, sizeof(data_prd));
         data_prd.source.ptr = req;
         data_prd.read_callback = h2_cb_req_submit;
@@ -1172,11 +1303,12 @@ static int h2_cb_on_header(nghttp2_session *session,
                     memcpy(b64tmp, value + strlen(GETDNS), b64len);
                     b64tmp[b64len] = '\0';
                     req->h2_request_len = 0;
-                    if(dohd_url64_check(b64tmp) == 0) {
+                    if(dohd_url64_check(b64tmp, b64len) == 0) {
                         dohd_destroy_request(req);
                         return 0;
                     }
-                    outlen = dohd_url64_decode(b64tmp, req->h2_request_buffer);
+                    outlen = dohd_url64_decode(b64tmp, b64len,
+                            req->h2_request_buffer, sizeof(req->h2_request_buffer));
                     if (outlen <= 0) {
                         dohd_destroy_request(req);
                         return 0;
@@ -1218,6 +1350,8 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
     /* Verify client still exists in hash table */
     if (!client_hash_exists(cd))
         return;
+    /* Read activity on this connection: reset the idle timeout */
+    client_arm_idle_timer(cd);
     if (!cd->tls_handshake_done) {
         /* Establish TLS connection */
         ret = wolfSSL_accept(cd->ssl);
@@ -1236,8 +1370,9 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
             }
             if (wolfSSL_ALPN_GetProtocol(cd->ssl, &proto, &proto_len) &&
                     (2 == proto_len) && strncmp(proto, "h2", 2) == 0) {
-                nghttp2_settings_entry iv[1] = {
-                    {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100}
+                nghttp2_settings_entry iv[2] = {
+                    {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100},
+                    {NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, H2_MAX_HEADER_LIST_SIZE}
                 };
 
                 nghttp2_session_callbacks *h2_cbs;
@@ -1251,7 +1386,7 @@ static void tls_read(__attribute__((unused)) int fd, short __attribute__((unused
                 nghttp2_session_server_new(&cd->h2_session, h2_cbs, cd);
                 nghttp2_session_callbacks_del(h2_cbs);
                 cd->h2 = 1;
-                nghttp2_submit_settings(cd->h2_session, NGHTTP2_FLAG_NONE, iv, 1);
+                nghttp2_submit_settings(cd->h2_session, NGHTTP2_FLAG_NONE, iv, 2);
             }
             cd->tls_handshake_done = 1;
         }
@@ -1384,6 +1519,9 @@ static void dohd_new_connection(int __attribute__((unused)) fd,
 
     /* Insert into hash table - O(1) */
     client_hash_insert(cd);
+
+    /* Arm the connection idle timeout */
+    client_arm_idle_timer(cd);
 
     DOH_Stats.mem += sizeof(struct client_data);
     DOH_Stats.clients++;
@@ -1662,6 +1800,16 @@ int main(int argc, char *argv[])
 
     /* Initialize libevquick */
     evquick_init();
+    if (pipe(signal_pipe) != 0) {
+        dohprint(DOH_ERR, "ERROR: failed to create signal pipe");
+        return -1;
+    }
+    if (set_fd_nonblocking(signal_pipe[0]) != 0 ||
+            set_fd_nonblocking(signal_pipe[1]) != 0) {
+        dohprint(DOH_ERR, "ERROR: failed to make signal pipe non-blocking");
+        return -1;
+    }
+    evquick_addevent(signal_pipe[0], EVQUICK_EV_READ, handle_pending_signals, NULL, NULL);
 
     /* Initialize memory pools */
     client_pool = mempool_create(sizeof(struct client_data), MAX_CLIENTS);
